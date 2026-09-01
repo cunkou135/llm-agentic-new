@@ -41,6 +41,15 @@ class EffectSummary:
     paired: bool
 
 
+CLASSIFICATION_COLUMNS = [
+    "scenario", "source", "target", "parameter", "direction",
+    "manipulation_success", "primary_class", "underlying_class",
+    "intervention_scope", "source_onset", "target_onset",
+    "intervention_delay", "observational_lag", "lag_difference",
+    "source_effect", "target_effect", "not_applicable_reason",
+]
+
+
 def detect_onset(
     values: np.ndarray,
     significant: np.ndarray,
@@ -308,8 +317,8 @@ def estimate_all_effects(
 def direct_parameter_sources(representation: dict[str, Any]) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     for indicator in representation["indicators"]:
-        for association in indicator["parameter_associations"]:
-            if association["relationship"] == "direct":
+        for association in indicator.get("parameter_associations", []):
+            if association["relationship"] == "direct" and indicator["scale"] == "micro":
                 result.setdefault(association["parameter"], []).append(indicator["id"])
     return {key: sorted(set(value)) for key, value in result.items()}
 
@@ -321,6 +330,8 @@ def classify_edge_interventions(
     representation: dict[str, Any],
     lag_tolerance: int,
 ) -> pd.DataFrame:
+    if not graph:
+        return pd.DataFrame(columns=CLASSIFICATION_COLUMNS)
     effect_lookup = {
         (row.parameter, row.direction, row.node_id): row
         for row in effects[effects["scenario"] == scenario].itertuples()
@@ -352,6 +363,7 @@ def classify_edge_interventions(
                     "lag_difference": np.nan,
                     "source_effect": np.nan,
                     "target_effect": np.nan,
+                    "not_applicable_reason": "",
                 }
             )
             continue
@@ -411,9 +423,10 @@ def classify_edge_interventions(
                         "lag_difference": lag_difference,
                         "source_effect": source_effect,
                         "target_effect": target_effect,
+                        "not_applicable_reason": "",
                     }
                 )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=CLASSIFICATION_COLUMNS)
 
 
 def graph_paths(
@@ -556,17 +569,40 @@ def run_intervention_stage(
     graphs = load_graph_records(run_root / "analysis" / "main_graphs.jsonl")
     classifications = []
     timings = []
+    graph_methods = (
+        "unrestricted_temporal_search",
+        "single_trajectory",
+        "trajectory_vote",
+        "full_method",
+    )
     for scenario, representation in sorted(representations.items()):
+        for method in graph_methods:
+            graph = graphs[(scenario, method)]
+            classified = classify_edge_interventions(
+                    scenario,
+                    graph,
+                    effects,
+                    representation,
+                    int(config["intervention"]["lag_tolerance"]),
+                )
+            if classified.empty:
+                classified = pd.DataFrame(
+                    [{
+                        "scenario": scenario,
+                        "source": "", "target": "", "parameter": "",
+                        "direction": "", "manipulation_success": False,
+                        "primary_class": "not_applicable",
+                        "underlying_class": "not_applicable",
+                        "intervention_scope": "none", "source_onset": -1,
+                        "target_onset": -1, "intervention_delay": np.nan,
+                        "observational_lag": np.nan, "lag_difference": np.nan,
+                        "source_effect": np.nan, "target_effect": np.nan,
+                        "not_applicable_reason": "no_temporally_retained_edges",
+                    }]
+                )
+            classified.insert(1, "method", method)
+            classifications.append(classified)
         graph = graphs[(scenario, "full_method")]
-        classifications.append(
-            classify_edge_interventions(
-                scenario,
-                graph,
-                effects,
-                representation,
-                int(config["intervention"]["lag_tolerance"]),
-            )
-        )
         timings.append(
             path_timing_summary(scenario, graph, effects, representation)
         )
@@ -592,4 +628,3 @@ def run_intervention_stage(
         "classification_rows": len(classification_frame),
         "path_rows": len(timing_frame),
     }
-

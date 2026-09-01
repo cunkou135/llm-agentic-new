@@ -12,6 +12,24 @@ Scale = Literal["micro", "meso", "macro"]
 Direction = Literal["increase", "decrease", "mixed", "unknown"]
 
 
+class TemporalAggregationSpec(BaseModel):
+    """Strict temporal transformation applied after an indicator is computed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["identity", "rolling_mean", "difference", "cumulative_mean"]
+    window: int | None = None
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "TemporalAggregationSpec":
+        if self.op == "rolling_mean":
+            if self.window is None or isinstance(self.window, bool) or self.window <= 0:
+                raise ValueError("rolling_mean requires a positive integer window")
+        elif self.window is not None:
+            raise ValueError(f"{self.op} does not accept window")
+        return self
+
+
 class ParameterAssociation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -33,7 +51,7 @@ class IndicatorSpec(BaseModel):
     entities: str = Field(min_length=2)
     source_fields: list[str] = Field(min_length=1)
     computation: dict[str, Any]
-    temporal_aggregation: dict[str, Any]
+    temporal_aggregation: TemporalAggregationSpec
     parameter_associations: list[ParameterAssociation] = Field(default_factory=list)
     scientific_rationale: str = Field(min_length=12)
 
@@ -54,6 +72,22 @@ class CandidateEdge(BaseModel):
     target: str
     expected_direction: Direction
     rationale: str = Field(min_length=12)
+
+
+class RequiredCandidateEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    target: str
+
+
+class ProspectiveValidationCriteria(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    required_source_response: bool = True
+    required_downstream_response: list[bool] = Field(min_length=1)
+    required_temporal_order: bool = True
+    required_candidate_edges: list[RequiredCandidateEdge] = Field(min_length=1)
 
 
 class StructuredRepresentation(BaseModel):
@@ -105,6 +139,7 @@ class ProspectivePrediction(BaseModel):
         min_length=1
     )
     expected_temporal_order: list[str] = Field(min_length=2)
+    validation_criteria: ProspectiveValidationCriteria
     scientific_rationale: str = Field(min_length=12)
     falsification_condition: str = Field(min_length=12)
 
@@ -114,6 +149,12 @@ class ProspectivePrediction(BaseModel):
             self.expected_downstream_direction
         ):
             raise ValueError("downstream indicators and directions must have equal length")
+        if len(self.validation_criteria.required_downstream_response) != len(
+            self.downstream_indicators
+        ):
+            raise ValueError(
+                "required downstream responses and downstream indicators must have equal length"
+            )
         return self
 
 
@@ -131,4 +172,3 @@ def identifier_slug(value: str) -> str:
     if not slug or not slug[0].isalpha():
         slug = f"item_{slug}"
     return slug[:64]
-

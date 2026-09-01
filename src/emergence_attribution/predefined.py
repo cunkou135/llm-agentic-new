@@ -15,10 +15,6 @@ def _reduce(op: str, name: str, axis: str = "agent", **extra: Any) -> dict[str, 
     return {"op": op, "input": _field(name), "axis": axis, **extra}
 
 
-def _channel(index: int) -> dict[str, Any]:
-    return {"op": "select", "input": _field("mechanism_channel"), "axis": "channel", "index": index}
-
-
 def _micro_expressions(scenario: str) -> list[tuple[str, str, dict[str, Any]]]:
     if scenario == "schelling":
         return [
@@ -96,11 +92,12 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
             }
         )
     for index in range(8):
-        expression = (
-            _channel(index // 2)
-            if index % 2 == 0
-            else {"op": "rolling_mean", "input": _channel(index // 2), "window": 3}
-        )
+        base = micro[(2 * index) % len(micro)][2]
+        expression = {
+            "op": "rolling_mean",
+            "input": base,
+            "window": 3 + 2 * (index % 2),
+        }
         indicators.append(
             {
                 "id": f"{prefix}_meso_{index:02d}",
@@ -109,8 +106,8 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                 "phenomenon": "fixed observable comparator",
                 "scale": "meso",
                 "branch_id": f"branch_{index // 2}",
-                "entities": "system channel",
-                "source_fields": ["mechanism_channel"],
+                "entities": "public simulator states and interaction logs",
+                "source_fields": sorted(expression_fields(expression)),
                 "computation": expression,
                 "temporal_aggregation": {"op": "identity"},
                 "parameter_associations": [],
@@ -118,7 +115,7 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
             }
         )
     for index in range(4):
-        expression = _channel(index + 4)
+        expression = {"op": "time_difference", "input": micro[12 + index][2]}
         indicators.append(
             {
                 "id": f"{prefix}_macro_{index:02d}",
@@ -127,10 +124,10 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                 "phenomenon": "fixed observable comparator",
                 "scale": "macro",
                 "branch_id": f"branch_{index}",
-                "entities": "system channel",
-                "source_fields": ["mechanism_channel"],
+                "entities": "public system-level simulator summary",
+                "source_fields": sorted(expression_fields(expression)),
                 "computation": expression,
-                "temporal_aggregation": {"op": "identity"},
+                "temporal_aggregation": {"op": "cumulative_mean"},
                 "parameter_associations": [],
                 "scientific_rationale": "Predefined only for the fixed-observable ablation comparator.",
             }
@@ -158,6 +155,14 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                     "rationale": "Fixed adjacent-scale comparator relation defined before evaluation.",
                 }
             )
+        edges.append(
+            {
+                "source": micro_ids[0],
+                "target": meso_ids[1],
+                "expected_direction": "unknown",
+                "rationale": "Fixed adjacent-scale comparator relation defined before evaluation.",
+            }
+        )
     return {
         "scenario": scenario,
         "phenomenon": "fixed observable comparator",
@@ -165,4 +170,3 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
         "candidate_edges": edges,
         "interpretation_boundary": "This fixed comparator receives temporal and intervention evaluation only in the ablation and never supplies the full method.",
     }
-

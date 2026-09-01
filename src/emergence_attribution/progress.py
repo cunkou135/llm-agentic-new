@@ -21,10 +21,12 @@ from rich.progress import (
 
 class ProgressReporter:
     STAGES = [
-        "simulation",
         "semantic",
+        "baseline_simulation",
         "temporal",
+        "intervention_simulation",
         "intervention",
+        "prospective",
         "robustness",
         "export",
         "render",
@@ -86,6 +88,7 @@ class ProgressReporter:
             total=max(total, 1),
             completed=completed,
         )
+        self.stage_total = max(total, 1)
         self._write(
             {
                 "event": "progress",
@@ -100,7 +103,9 @@ class ProgressReporter:
 
     def finish_stage(self, stage: str, skipped: bool = False) -> None:
         if self.stage_task is not None:
-            self.progress.update(self.stage_task, completed=self.stage_total)
+            self.progress.update(
+                self.stage_task, total=self.stage_total, completed=self.stage_total
+            )
         self.progress.advance(self.overall_task, 1)
         self._write(
             {

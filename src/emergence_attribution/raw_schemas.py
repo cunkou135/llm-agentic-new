@@ -24,7 +24,7 @@ _COMMON_METADATA = [
 ]
 
 
-RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
+PUBLIC_RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
     "schelling": _COMMON_METADATA
     + [
         {
@@ -104,23 +104,6 @@ RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
             "semantic_meaning": "whether an agent has at least one occupied different-group neighbour",
             "entity_level": "agent",
         },
-        {
-            "field_name": "mechanism_channel",
-            "dtype": "float32",
-            "shape": ["time", "channel"],
-            "semantic_meaning": "instrumented continuous internal organisation states recorded by the controlled simulator",
-            "entity_level": "system channel",
-            "channel_semantics": [
-                "local satisfaction coordination",
-                "relocation organisation",
-                "spatial interface organisation",
-                "group mixing organisation",
-                "system segregation",
-                "cluster concentration",
-                "interface permeability",
-                "collective spatial integration",
-            ],
-        },
     ],
     "deffuant": _COMMON_METADATA
     + [
@@ -194,23 +177,6 @@ RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
             "semantic_meaning": "number of agents with absolute opinion at least 0.75",
             "entity_level": "system log aggregate",
         },
-        {
-            "field_name": "mechanism_channel",
-            "dtype": "float32",
-            "shape": ["time", "channel"],
-            "semantic_meaning": "instrumented continuous internal organisation states recorded by the controlled simulator",
-            "entity_level": "system channel",
-            "channel_semantics": [
-                "local assimilation coordination",
-                "opinion-update contraction",
-                "repulsive interaction organisation",
-                "interaction rejection organisation",
-                "population consensus",
-                "opinion-cluster concentration",
-                "population extremity",
-                "collective opinion integration",
-            ],
-        },
     ],
     "toy": [
         {
@@ -231,6 +197,29 @@ RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
 }
 
 
+# These fields are never included in prompts, public NPZ files, or Full Discovery
+# compilation.  They exist only for the separately labelled Controlled Recovery
+# benchmark and are persisted below data/reference_hidden/.
+HIDDEN_REFERENCE_SCHEMAS: dict[str, list[dict[str, Any]]] = {
+    scenario: [
+        {
+            "field_name": "mechanism_channel",
+            "dtype": "float32",
+            "shape": ["time", "channel"],
+            "semantic_meaning": "withheld controlled-benchmark state",
+            "entity_level": "hidden reference",
+        }
+    ]
+    for scenario in ("schelling", "deffuant")
+}
+
+HIDDEN_REFERENCE_FIELD_NAMES = frozenset(
+    item["field_name"]
+    for schema in HIDDEN_REFERENCE_SCHEMAS.values()
+    for item in schema
+)
+
+
 RULES = {
     "schelling": [
         "Each occupied cell contains one fixed-group agent and the grid is periodic.",
@@ -249,8 +238,22 @@ RULES = {
 }
 
 
+def public_raw_schema(scenario: str) -> list[dict[str, Any]]:
+    """Return the only schema visible to semantic generation and Full Discovery."""
+
+    return deepcopy(PUBLIC_RAW_SCHEMAS[scenario])
+
+
+def hidden_reference_schema(scenario: str) -> list[dict[str, Any]]:
+    """Return the isolated schema used only by the Controlled Recovery evaluator."""
+
+    return deepcopy(HIDDEN_REFERENCE_SCHEMAS.get(scenario, []))
+
+
 def raw_schema(scenario: str) -> list[dict[str, Any]]:
-    return deepcopy(RAW_SCHEMAS[scenario])
+    """Backward-compatible public-schema alias."""
+
+    return public_raw_schema(scenario)
 
 
 def prompt_scenario_contract(scenario: str, spec: dict[str, Any]) -> dict[str, Any]:
@@ -268,5 +271,5 @@ def prompt_scenario_contract(scenario: str, spec: dict[str, Any]) -> dict[str, A
             }
             for name, levels in spec["interventions"].items()
         ],
-        "raw_field_schema": raw_schema(scenario),
+        "raw_field_schema": public_raw_schema(scenario),
     }

@@ -18,6 +18,7 @@ from .dsl import (
     expression_fields,
     grammar_description,
     validate_indicator_expression,
+    validate_temporal_aggregation,
 )
 from .llm_client import LLMResponse, OpenAICompatibleClient, load_llm_config
 from .raw_schemas import prompt_scenario_contract, raw_schema
@@ -35,6 +36,14 @@ FORBIDDEN_PROMPT_KEYS = {
     "temporal_results",
     "intervention_results",
     "baseline_numerical_summary",
+    "mechanism_channel",
+    "controlled latent",
+    "reference process",
+    "reference branch",
+    "reference edge",
+    "reference lag",
+    "reference sign",
+    "truth role",
 }
 
 
@@ -53,11 +62,20 @@ def build_prompt(
     contract["generic_computation_grammar"] = grammar_description()
     contract["representation_budget"] = representation_config["budget"]
     contract["required_branch_count"] = representation_config["required_branch_count"]
+    contract["candidate_edge_bounds"] = {
+        "minimum": representation_config["minimum_candidate_edges"],
+        "maximum": representation_config["maximum_candidate_edges"],
+    }
     contract["structural_constraints"] = [
         "candidate edges may be micro to meso or meso to macro only",
         "candidate edges must remain within a generated branch",
         "every branch must include at least one connected micro to meso to macro path",
-        "all configured controllable parameters must have at least one model-proposed association",
+        "every micro node must have an outgoing candidate edge to a meso node",
+        "every meso node must have an incoming micro edge and an outgoing macro edge",
+        "every macro node must have an incoming meso edge",
+        "every controllable parameter must have at least one direct micro-level association",
+        "each prediction source must be such a direct micro-level association and its ordered path must exist in candidate_edges",
+        "prospective validation criteria must be Boolean and edge-list fields, not prose",
         "the model must not infer any result from unprovided simulation statistics",
     ]
     user = (
@@ -139,6 +157,12 @@ def validate_generation(
             validate_indicator_expression(indicator.computation, schema)
         except DSLValidationError as exc:
             errors.append(f"indicator {indicator.id}: {exc}")
+        try:
+            validate_temporal_aggregation(
+                indicator.temporal_aggregation.model_dump(mode="json", exclude_none=True)
+            )
+        except DSLValidationError as exc:
+            errors.append(f"indicator {indicator.id}: {exc}")
         actual_fields = expression_fields(indicator.computation)
         if actual_fields != set(indicator.source_fields):
             errors.append(
@@ -146,6 +170,7 @@ def validate_generation(
             )
     parameter_names = set(scenario_spec["interventions"])
     proposed_parameters: set[str] = set()
+    direct_micro_sources: dict[str, set[str]] = {name: set() for name in parameter_names}
     for indicator in representation.indicators:
         for association in indicator.parameter_associations:
             if association.parameter not in parameter_names:
@@ -154,10 +179,41 @@ def validate_generation(
                 )
             else:
                 proposed_parameters.add(association.parameter)
+                if association.relationship == "direct" and indicator.scale == "micro":
+                    direct_micro_sources[association.parameter].add(indicator.id)
     if representation_config.get("require_all_parameters_associated", False):
         missing = sorted(parameter_names - proposed_parameters)
         if missing:
             errors.append(f"missing model-proposed parameter associations: {missing}")
+        missing_direct = sorted(
+            name for name, sources in direct_micro_sources.items() if not sources
+        )
+        if missing_direct:
+            errors.append(
+                f"parameters require at least one direct micro source: {missing_direct}"
+            )
+    edge_pairs = {(edge.source, edge.target) for edge in representation.candidate_edges}
+    incoming = {item.id: 0 for item in representation.indicators}
+    outgoing = {item.id: 0 for item in representation.indicators}
+    for source, target in edge_pairs:
+        outgoing[source] += 1
+        incoming[target] += 1
+    for indicator in representation.indicators:
+        if indicator.scale == "micro" and outgoing[indicator.id] < 1:
+            errors.append(f"micro indicator {indicator.id} needs an outgoing meso edge")
+        if indicator.scale == "meso" and (
+            incoming[indicator.id] < 1 or outgoing[indicator.id] < 1
+        ):
+            errors.append(f"meso indicator {indicator.id} needs incoming and outgoing edges")
+        if indicator.scale == "macro" and incoming[indicator.id] < 1:
+            errors.append(f"macro indicator {indicator.id} needs an incoming meso edge")
+    edge_count = len(representation.candidate_edges)
+    minimum_edges = int(representation_config["minimum_candidate_edges"])
+    maximum_edges = int(representation_config["maximum_candidate_edges"])
+    if not minimum_edges <= edge_count <= maximum_edges:
+        errors.append(
+            f"candidate edge count {edge_count} must be within [{minimum_edges}, {maximum_edges}]"
+        )
     indicator_ids = {item.id for item in representation.indicators}
     prediction_ids: set[str] = set()
     for prediction in value.prospective_predictions:
@@ -166,6 +222,10 @@ def validate_generation(
         prediction_ids.add(prediction.prediction_id)
         if prediction.parameter not in parameter_names:
             errors.append(f"prediction {prediction.prediction_id}: unknown parameter")
+        elif prediction.source_indicator not in direct_micro_sources[prediction.parameter]:
+            errors.append(
+                f"prediction {prediction.prediction_id}: source must be a direct micro association for its parameter"
+            )
         referenced = {prediction.source_indicator, *prediction.downstream_indicators}
         unknown = sorted(referenced - indicator_ids)
         if unknown:
@@ -178,6 +238,35 @@ def validate_generation(
         ]:
             errors.append(
                 f"prediction {prediction.prediction_id}: temporal order must list source then downstream indicators"
+            )
+        required_path = list(zip(
+            prediction.expected_temporal_order,
+            prediction.expected_temporal_order[1:],
+        ))
+        missing_path = [pair for pair in required_path if pair not in edge_pairs]
+        if missing_path:
+            errors.append(
+                f"prediction {prediction.prediction_id}: ordered path is absent from candidate graph {missing_path}"
+            )
+        criteria = prediction.validation_criteria
+        required_edges = {
+            (item.source, item.target) for item in criteria.required_candidate_edges
+        }
+        if not criteria.required_source_response:
+            errors.append(
+                f"prediction {prediction.prediction_id}: required_source_response must be true"
+            )
+        if not criteria.required_temporal_order:
+            errors.append(
+                f"prediction {prediction.prediction_id}: required_temporal_order must be true"
+            )
+        if not all(criteria.required_downstream_response):
+            errors.append(
+                f"prediction {prediction.prediction_id}: all downstream responses must be required"
+            )
+        if not set(required_path).issubset(required_edges):
+            errors.append(
+                f"prediction {prediction.prediction_id}: validation criteria omit candidate path edges"
             )
     signatures = [
         json.dumps(computation_signature(item.computation), sort_keys=True)
@@ -200,6 +289,9 @@ def validate_generation(
         "parameter_coverage": sorted(proposed_parameters),
         "indicator_count": len(representation.indicators),
         "candidate_edge_count": len(representation.candidate_edges),
+        "direct_micro_parameter_sources": {
+            name: sorted(sources) for name, sources in direct_micro_sources.items()
+        },
     }
 
 
@@ -297,7 +389,7 @@ def run_generation(
         "status": "accepted" if accepted is not None else "rejected",
         "duration_seconds": time.perf_counter() - started,
         "repair_rounds": sum(call["status"] != "accepted" for call in calls),
-        "accepted_generation": accepted.model_dump(mode="json") if accepted else None,
+        "accepted_generation": accepted.model_dump(mode="json", exclude_none=True) if accepted else None,
         "validation": accepted_validation,
         "calls": calls,
     }
@@ -357,8 +449,11 @@ def run_semantic_stage(
     prompt_template_path: Path,
     workers: int,
     progress_callback: Callable[[str, int, int], None] | None = None,
+    completion_provider: Callable[[str, int], Callable[[str, str], LLMResponse]] | None = None,
 ) -> dict[str, Any]:
-    llm_config = load_llm_config(llm_config_path, require_key=True)
+    llm_config = load_llm_config(
+        llm_config_path, require_key=completion_provider is None
+    )
     prompt_template = prompt_template_path.read_text(encoding="utf-8")
     output_root = run_root / "llm"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -378,6 +473,7 @@ def run_semantic_stage(
                 llm_config,
                 prompt_template,
                 output_root,
+                completion_provider(scenario, index) if completion_provider else None,
             ): (scenario, index)
             for scenario, index in jobs
         }
@@ -451,4 +547,3 @@ def load_frozen_representations(run_root: Path) -> dict[str, dict[str, Any]]:
     if not result:
         raise FileNotFoundError("no frozen representations were found")
     return result
-

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -247,9 +248,9 @@ def discover_point_graph_from_blocks(
                         p_value=float(p_value),
                         q_value=float(q_value),
                         effect_direction="increase" if beta > 0 else "decrease",
-                        support=1.0,
-                        lag_support=1.0,
-                        lag_std=0.0,
+                        support=float("nan"),
+                        lag_support=float("nan"),
+                        lag_std=float("nan"),
                         branch_id=branch,
                     )
                 )
@@ -332,7 +333,18 @@ def discover_bootstrap_graph(
             lag_count[key] = lag_count.get(key, 0) + 1
             lag_samples.setdefault((edge.source, edge.target), []).append(edge.lag)
         edge_sets.append(
-            {"replicate": replicate, "edges": [asdict(edge) for edge in graph]}
+            {
+                "replicate": replicate,
+                "edges": [
+                    {
+                        **asdict(edge),
+                        "support": None,
+                        "lag_support": None,
+                        "lag_std": None,
+                    }
+                    for edge in graph
+                ],
+            }
         )
     retained: list[TemporalEdge] = []
     for edge in point:
@@ -440,7 +452,19 @@ def run_temporal_stage(
     temporal_config = config["temporal"]
     records: list[dict[str, Any]] = []
     bootstrap_summaries: dict[str, Any] = {}
+    runtime_rows: list[dict[str, Any]] = []
     for scenario, representation in sorted(representations.items()):
+        semantic_seconds = 0.0
+        for path in sorted((run_root / "llm" / scenario).glob("generation_*/generation_result.json")):
+            semantic_seconds += float(
+                json.loads(path.read_text(encoding="utf-8"))["duration_seconds"]
+            )
+        runtime_rows.append({
+            "scenario": scenario,
+            "method": "llm_semantic_proposal",
+            "runtime_seconds": semantic_seconds,
+            "runtime_scope": "semantic_generation",
+        })
         by_seed = trajectories(baseline_dataset, scenario)
         frames = [by_seed[seed] for seed in sorted(by_seed)]
         candidates = representation_candidates(representation)
@@ -449,6 +473,7 @@ def run_temporal_stage(
             if progress_callback:
                 progress_callback("Trajectory bootstrap", completed, total, scenario)
 
+        started = time.perf_counter()
         full_graph, bootstrap = discover_bootstrap_graph(
             frames,
             candidates,
@@ -462,6 +487,7 @@ def run_temporal_stage(
             workers,
             bootstrap_progress,
         )
+        runtime_rows.append({"scenario": scenario, "method": "full_method", "runtime_seconds": time.perf_counter() - started, "runtime_scope": "temporal_analysis"})
         point_blocks = prepare_target_blocks(
             frames, candidates, int(temporal_config["maximum_lag"])
         )
@@ -470,6 +496,7 @@ def run_temporal_stage(
             float(temporal_config["parent_alpha"]),
             float(temporal_config["fdr_alpha"]),
         )
+        started = time.perf_counter()
         single_blocks = prepare_target_blocks(
             frames[:1], candidates, int(temporal_config["maximum_lag"])
         )
@@ -478,6 +505,8 @@ def run_temporal_stage(
             float(temporal_config["parent_alpha"]),
             float(temporal_config["fdr_alpha"]),
         )
+        runtime_rows.append({"scenario": scenario, "method": "single_trajectory", "runtime_seconds": time.perf_counter() - started, "runtime_scope": "temporal_analysis"})
+        started = time.perf_counter()
         vote_graph = discover_vote_graph(
             frames,
             candidates,
@@ -486,15 +515,22 @@ def run_temporal_stage(
             float(temporal_config["fdr_alpha"]),
             float(temporal_config["vote_threshold"]),
         )
+        runtime_rows.append({"scenario": scenario, "method": "trajectory_vote", "runtime_seconds": time.perf_counter() - started, "runtime_scope": "temporal_analysis"})
         unrestricted = unrestricted_candidates(representation)
-        unrestricted_blocks = prepare_target_blocks(
-            frames, unrestricted, int(temporal_config["maximum_lag"])
-        )
-        unrestricted_graph = discover_point_graph_from_blocks(
-            unrestricted_blocks,
+        started = time.perf_counter()
+        unrestricted_graph, unrestricted_bootstrap = discover_bootstrap_graph(
+            frames,
+            unrestricted,
+            int(temporal_config["maximum_lag"]),
             float(temporal_config["parent_alpha"]),
             float(temporal_config["fdr_alpha"]),
+            int(temporal_config["bootstrap_repetitions"]),
+            float(temporal_config["support_threshold"]),
+            int(config["master_seed"]),
+            f"{scenario}:unrestricted",
+            workers,
         )
+        runtime_rows.append({"scenario": scenario, "method": "unrestricted_temporal_search", "runtime_seconds": time.perf_counter() - started, "runtime_scope": "temporal_analysis"})
         methods = {
             "llm_semantic_proposal": semantic_graph(representation),
             "unrestricted_temporal_search": unrestricted_graph,
@@ -512,6 +548,7 @@ def run_temporal_stage(
         )
         bootstrap_summaries[scenario] = bootstrap
         bootstrap_summaries[scenario]["point_graph"] = [asdict(edge) for edge in point_graph]
+        bootstrap_summaries[scenario]["unrestricted"] = unrestricted_bootstrap
     analysis_root = run_root / "analysis"
     analysis_root.mkdir(parents=True, exist_ok=True)
     write_graph_records(analysis_root / "main_graphs.jsonl", records)
@@ -519,7 +556,10 @@ def run_temporal_stage(
         json.dumps(bootstrap_summaries, indent=2, ensure_ascii=False, allow_nan=True),
         encoding="utf-8",
     )
-    return {"graphs": records, "bootstrap": bootstrap_summaries}
+    pd.DataFrame(runtime_rows).to_csv(
+        analysis_root / "method_runtime.csv", index=False
+    )
+    return {"graphs": records, "bootstrap": bootstrap_summaries, "runtime": runtime_rows}
 
 
 def load_graph_records(path: Path) -> dict[tuple[str, str], list[TemporalEdge]]:
@@ -532,4 +572,3 @@ def load_graph_records(path: Path) -> dict[tuple[str, str], list[TemporalEdge]]:
             TemporalEdge(**edge) for edge in record["edges"]
         ]
     return result
-

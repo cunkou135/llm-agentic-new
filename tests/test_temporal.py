@@ -59,7 +59,7 @@ def test_trajectory_bootstrap_reproducible() -> None:
     assert first_summary["edge_sets"] == second_summary["edge_sets"]
 
 
-def test_parallel_and_single_worker_determinism() -> None:
+def test_workers_1_equals_workers_2() -> None:
     frames = _synthetic_frames(count=6, steps=180)
     single, summary_single = discover_bootstrap_graph(
         frames, CANDIDATES, 5, 0.10, 0.05, 8, 0.50, 321, "parallel", 1
@@ -69,4 +69,3 @@ def test_parallel_and_single_worker_determinism() -> None:
     )
     assert single == parallel
     assert summary_single["edge_sets"] == summary_parallel["edge_sets"]
-

@@ -1,11 +1,11 @@
 {
-  "schema_version": "1.0",
-  "master_seed": 20260901,
-  "formal_run": true,
-  "random_seeds": [1101, 1102, 1103, 1104, 1105, 1106, 1107, 1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1117, 1118, 1119, 1120, 1121, 1122, 1123, 1124],
+  "schema_version": "1.0-dev",
+  "master_seed": 20260902,
+  "formal_run": false,
+  "random_seeds": [901, 902],
   "representation": {
-    "independent_generations": 3,
-    "maximum_repair_rounds": 3,
+    "independent_generations": 2,
+    "maximum_repair_rounds": 1,
     "required_branch_count": 4,
     "budget": {"micro": 16, "meso": 8, "macro": 4},
     "minimum_candidate_edges": 28,
@@ -17,64 +17,59 @@
     "maximum_lag": 5,
     "parent_alpha": 0.10,
     "fdr_alpha": 0.05,
-    "bootstrap_repetitions": 100,
+    "bootstrap_repetitions": 6,
     "support_threshold": 0.65,
     "vote_threshold": 0.50
   },
   "intervention": {
-    "bootstrap_repetitions": 500,
+    "bootstrap_repetitions": 6,
     "confidence_level": 0.95,
     "onset_detection_start": 0,
     "minimum_standardised_effect": 0.10,
     "onset_consecutive_steps": 4,
-    "evaluation_start": 15,
-    "terminal_window": 24,
+    "evaluation_start": 4,
+    "terminal_window": 4,
     "lag_tolerance": 2,
     "baseline_sd_definition": "sample_sd_over_all_baseline_seed_time_values_from_evaluation_start"
   },
   "evaluation": {
-    "trajectory_counts": [1, 2, 4, 8, 12, 16, 20, 24],
-    "repeated_subsampling_repetitions": 12,
-    "data_efficiency_bootstrap_repetitions": 30
+    "trajectory_counts": [1, 2],
+    "repeated_subsampling_repetitions": 2,
+    "data_efficiency_bootstrap_repetitions": 5
   },
   "robustness": {
-    "noise_levels": [0.0, 0.05, 0.10, 0.20],
-    "missing_fractions": [0.0, 0.05, 0.10, 0.20],
-    "support_thresholds": [0.50, 0.60, 0.65, 0.75, 0.85],
-    "repetitions": 8,
-    "bootstrap_repetitions": 30,
-    "representation_error_ratios": [0.0, 0.10, 0.20, 0.40],
-    "representation_repetitions": 12,
-    "candidate_indicator_counts": [8, 16, 32, 64],
-    "scalability_repetitions": 5
+    "noise_levels": [0.0, 0.10],
+    "missing_fractions": [0.0, 0.10],
+    "support_thresholds": [0.50, 0.65],
+    "repetitions": 1,
+    "bootstrap_repetitions": 5,
+    "representation_error_ratios": [0.0, 0.20],
+    "representation_repetitions": 1,
+    "candidate_indicator_counts": [8, 16],
+    "scalability_repetitions": 1
   },
   "render": {
-    "formats": ["png", "svg", "pdf"],
-    "tiff_optional": true,
-    "tiff_dpi": 600,
-    "png_dpi": 300,
+    "formats": ["png"],
+    "tiff_optional": false,
+    "tiff_dpi": 150,
+    "png_dpi": 100,
     "figure_width_mm": 183,
     "effect_curve_centre": "mean",
     "effect_matrix_colour_range": "full_data_range",
     "graph_error_edge_alpha": 0.85,
     "font_family": ["Arial", "DejaVu Sans"],
     "font_size": 7,
-    "paper_background": "#FCFBF8",
-    "layout_version": "original_visual_language_dynamic_v1"
+    "paper_background": "#FCFBF8"
   },
   "scenarios": {
     "schelling": {
-      "label": "Delayed spatial segregation",
-      "description": "Agents of two groups occupy a periodic grid and may relocate when local same-group similarity is below tolerance.",
-      "num_agents": 720,
-      "grid_width": 30,
-      "grid_height": 30,
-      "num_steps": 160,
-      "baseline": {
-        "tolerance": 0.55,
-        "move_probability": 0.10,
-        "destination_preference": 0.80
-      },
+      "label": "NON_SCIENTIFIC delayed spatial dynamics",
+      "description": "Small public-state simulation used only for development validation.",
+      "num_agents": 40,
+      "grid_width": 7,
+      "grid_height": 7,
+      "num_steps": 22,
+      "baseline": {"tolerance": 0.55, "move_probability": 0.10, "destination_preference": 0.80},
       "parameter_descriptions": {
         "tolerance": "minimum local same-group fraction required for satisfaction",
         "move_probability": "probability that an unsatisfied agent attempts relocation in one step",
@@ -88,18 +83,13 @@
       "mechanism_variant": "disable_homophilic_relocation"
     },
     "deffuant": {
-      "label": "Delayed networked bounded confidence dynamics",
-      "description": "Agents on a rewired degree-eight network assimilate when opinions are close and may move apart under sufficiently distant encounters.",
-      "num_agents": 240,
-      "num_steps": 120,
-      "network_degree": 8,
+      "label": "NON_SCIENTIFIC delayed opinion dynamics",
+      "description": "Small public-state simulation used only for development validation.",
+      "num_agents": 24,
+      "num_steps": 24,
+      "network_degree": 4,
       "network_rewire_probability": 0.08,
-      "baseline": {
-        "confidence_bound": 0.35,
-        "assimilation_strength": 0.25,
-        "backfire_threshold": 0.65,
-        "backfire_strength": 0.02
-      },
+      "baseline": {"confidence_bound": 0.35, "assimilation_strength": 0.25, "backfire_threshold": 0.65, "backfire_strength": 0.02},
       "parameter_descriptions": {
         "confidence_bound": "largest opinion distance that permits assimilation",
         "assimilation_strength": "fraction of partner difference applied during assimilation",

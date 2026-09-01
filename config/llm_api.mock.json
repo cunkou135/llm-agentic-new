@@ -1,0 +1,9 @@
+{
+  "base_url": "",
+  "api_key": "",
+  "model": "deterministic-mock",
+  "temperature": 0.0,
+  "max_tokens": 12000,
+  "timeout": 1,
+  "max_retries": 0
+}

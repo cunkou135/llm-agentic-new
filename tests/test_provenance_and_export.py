@@ -37,25 +37,27 @@ def _llm_config() -> dict:
     }
 
 
-def test_api_key_redaction() -> None:
+def test_api_redaction() -> None:
     redacted = redacted_llm_config(_llm_config())
     assert redacted["api_key"] == "***REDACTED***"
     assert "secret-value" not in json.dumps(redacted)
     assert redacted["model"] == "test-model"
 
 
-def test_resume_checkpoint_verifies_output_hash(tmp_path: Path) -> None:
+def test_resume(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
     manager = RunManager.initialise(
-        project, "test_run", _contract_config(), _llm_config(), resume=False
+        project, "test_run", _contract_config(), _llm_config(), resume=False,
+        output_family="dev_runs",
     )
     output = manager.run_root / "analysis" / "value.txt"
     output.write_text("stable\n", encoding="utf-8")
     manager.mark_stage_completed("toy", [output], 0.1)
     resumed = RunManager.initialise(
-        project, "test_run", _contract_config(), _llm_config(), resume=True
+        project, "test_run", _contract_config(), _llm_config(), resume=True,
+        output_family="dev_runs",
     )
     assert resumed.stage_complete("toy")
     output.write_text("changed\n", encoding="utf-8")
@@ -75,7 +77,7 @@ def _write_visual_inputs(run_root: Path) -> None:
         unhappy_count=np.zeros(3, dtype=np.int32),
         agent_count=np.asarray([2], dtype=np.int32),
     )
-    (run_root / "data" / "simulation_manifest.json").write_text(
+    (run_root / "data" / "baseline_simulation_manifest.json").write_text(
         json.dumps(
             {
                 "task_records": [
@@ -94,6 +96,10 @@ def _write_visual_inputs(run_root: Path) -> None:
         json.dumps({"scenario": "toy", "method": "full_method", "edges": []}) + "\n",
         encoding="utf-8",
     )
+    (analysis / "controlled_recovery_graphs.jsonl").write_text(
+        json.dumps({"scenario": "toy", "method": "full_method", "edges": []}) + "\n",
+        encoding="utf-8",
+    )
     pd.DataFrame(
         [
             {
@@ -107,16 +113,23 @@ def _write_visual_inputs(run_root: Path) -> None:
         ]
     ).to_csv(analysis / "main_results.csv", index=False)
     pd.DataFrame(
+        [{
+            "evaluation_track": "controlled_recovery", "scenario": "toy",
+            "method": "full_method", "edge_f1": 0.0, "shd": 0.0,
+            "stability": 0.0, "lag_mae": np.nan,
+        }]
+    ).to_csv(analysis / "controlled_recovery_results.csv", index=False)
+    pd.DataFrame(
         [
             {
                 "scenario": "toy",
                 "method": "full_method",
                 "trajectory_count": 1,
                 "repetition": 0,
-                "edge_f1": 0.0,
+                "temporal_qualification_rate": 0.0,
                 "stability": 0.0,
-                "edge_f1_ci_low": 0.0,
-                "edge_f1_ci_high": 0.0,
+                "temporal_qualification_rate_ci_low": 0.0,
+                "temporal_qualification_rate_ci_high": 0.0,
                 "stability_ci_low": 0.0,
                 "stability_ci_high": 0.0,
             }
@@ -126,6 +139,7 @@ def _write_visual_inputs(run_root: Path) -> None:
         [
             {
                 "scenario": "toy",
+                "method": "full_method",
                 "parameter": "p",
                 "direction": "plus",
                 "node_id": "n",
@@ -170,6 +184,7 @@ def _write_visual_inputs(run_root: Path) -> None:
         [
             {
                 "scenario": "toy",
+                "method": "full_method",
                 "source": "a",
                 "target": "b",
                 "parameter": "p",
@@ -189,10 +204,9 @@ def _write_visual_inputs(run_root: Path) -> None:
                 "missing_fraction": 0.0,
                 "support_threshold": 0.65,
                 "repetition": 0,
-                "edge_f1": 0.0,
+                "temporal_qualification_rate": 0.0,
                 "stability": 0.0,
                 "retained_edge_count": 0,
-                "intervention_f1": np.nan,
             }
         ]
     ).to_csv(analysis / "observation_robustness.csv", index=False)
@@ -230,4 +244,3 @@ def test_visualization_bundle_uses_dynamic_schema(tmp_path: Path) -> None:
         )
     )
     assert generated["source_run"] == "example"
-

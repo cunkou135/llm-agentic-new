@@ -94,7 +94,7 @@ def _attach_controlled_channels(
     raw: dict[str, np.ndarray],
     seed: int,
     mechanism_variant: str,
-) -> None:
+) -> dict[str, np.ndarray]:
     processes = {item.process_id: item for item in reference_processes(scenario)}
     relations = reference_relations(scenario)
     micro_to_meso = relations[:]
@@ -130,7 +130,7 @@ def _attach_controlled_channels(
             0.70,
             mechanism_variant != "baseline" and second.mechanism == disabled_name,
         )
-    raw["mechanism_channel"] = np.column_stack([meso, macro]).astype(np.float32)
+    return {"mechanism_channel": np.column_stack([meso, macro]).astype(np.float32)}
 
 
 @dataclass(frozen=True)
@@ -228,7 +228,6 @@ def simulate_schelling(
             raw["destination_similarity"][time, agent] = _destination_similarity(
                 group_grid, destination_flat, int(groups[agent])
             )
-    _attach_controlled_channels(scenario="schelling", raw=raw, seed=seed, mechanism_variant=mechanism_variant)
     return raw
 
 
@@ -321,7 +320,6 @@ def simulate_deffuant(
         raw["sign_flip"][time] = np.sign(updated) != np.sign(opinions)
         raw["extreme_agent_count"][time] = int(np.sum(np.abs(opinions) >= 0.75))
         opinions = updated
-    _attach_controlled_channels(scenario="deffuant", raw=raw, seed=seed, mechanism_variant=mechanism_variant)
     return raw
 
 
@@ -346,3 +344,24 @@ def run_scenario(
     if scenario == "deffuant":
         return simulate_deffuant(seed, spec, parameters, mechanism_variant)
     raise KeyError(f"unknown scenario: {scenario}")
+
+
+def run_scenario_with_hidden(
+    scenario: str,
+    seed: int,
+    spec: dict[str, Any],
+    parameters: dict[str, float],
+    mechanism_variant: str = "baseline",
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Run a simulator and return physically separate public and hidden payloads."""
+
+    public = run_scenario(scenario, seed, spec, parameters, mechanism_variant)
+    hidden = _attach_controlled_channels(
+        scenario=scenario,
+        raw=public,
+        seed=seed,
+        mechanism_variant=mechanism_variant,
+    )
+    if set(public) & set(hidden):
+        raise RuntimeError("public and hidden simulator payloads overlap")
+    return public, hidden

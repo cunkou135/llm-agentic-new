@@ -17,7 +17,10 @@ from .temporal import load_graph_records
 
 CORE_ANALYSIS_FILES = [
     "main_graphs.jsonl",
+    "controlled_recovery_graphs.jsonl",
     "main_results.csv",
+    "full_discovery_results.csv",
+    "controlled_recovery_results.csv",
     "data_efficiency_repeated_subsampling.csv",
     "effect_curves.parquet",
     "paired_effects.parquet",
@@ -136,7 +139,7 @@ def create_visualization_bundle(run_root: Path) -> dict[str, Any]:
             shutil.copy2(source, analysis_root / name)
     raw_items = []
     simulation_manifest = json.loads(
-        (run_root / "data" / "simulation_manifest.json").read_text(encoding="utf-8")
+        (run_root / "data" / "baseline_simulation_manifest.json").read_text(encoding="utf-8")
     )
     for scenario in sorted({item["scenario"] for item in simulation_manifest["task_records"]}):
         baseline = sorted(
@@ -172,19 +175,19 @@ def create_visualization_bundle(run_root: Path) -> dict[str, Any]:
             "output": "figure_3_graph_recovery.png",
             "inputs": [
                 {
-                    "path": relative_analysis("main_graphs.jsonl").as_posix(),
+                    "path": relative_analysis("controlled_recovery_graphs.jsonl").as_posix(),
                     "format": "jsonl",
                     "records": sum(
                         1
-                        for line in (analysis_root / "main_graphs.jsonl")
+                        for line in (analysis_root / "controlled_recovery_graphs.jsonl")
                         .read_text(encoding="utf-8")
                         .splitlines()
                         if line.strip()
                     ),
                 },
                 _frame_manifest(
-                    analysis_root / "main_results.csv",
-                    ["scenario", "method", "edge_f1", "shd", "stability", "lag_mae"],
+                    analysis_root / "controlled_recovery_results.csv",
+                    ["evaluation_track", "scenario", "method", "edge_f1", "shd", "stability", "lag_mae"],
                 ),
             ],
         },
@@ -199,10 +202,10 @@ def create_visualization_bundle(run_root: Path) -> dict[str, Any]:
                         "method",
                         "trajectory_count",
                         "repetition",
-                        "edge_f1",
+                        "temporal_qualification_rate",
                         "stability",
-                        "edge_f1_ci_low",
-                        "edge_f1_ci_high",
+                        "temporal_qualification_rate_ci_low",
+                        "temporal_qualification_rate_ci_high",
                         "stability_ci_low",
                         "stability_ci_high",
                     ],
@@ -257,7 +260,7 @@ def create_visualization_bundle(run_root: Path) -> dict[str, Any]:
             "inputs": [
                 _frame_manifest(
                     analysis_root / "observation_robustness.csv",
-                    ["scenario", "factor", "noise_level", "missing_fraction", "support_threshold", "repetition", "edge_f1", "stability", "retained_edge_count", "intervention_f1"],
+                    ["scenario", "factor", "noise_level", "missing_fraction", "support_threshold", "repetition", "temporal_qualification_rate", "stability", "retained_edge_count"],
                 ),
                 _frame_manifest(
                     analysis_root / "causal_scalability.csv",

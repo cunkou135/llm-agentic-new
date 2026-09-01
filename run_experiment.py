@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_workers(value: str) -> int:
     if value.lower() == "auto":
-        return max(1, (os.cpu_count() or 2) - 1)
+        return max(1, min((os.cpu_count() or 2) - 1, 12))
     workers = int(value)
     if workers < 1:
         raise ValueError("workers must be a positive integer or auto")
@@ -82,4 +82,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -12,13 +12,11 @@ from typing import Any, Callable, Sequence
 import numpy as np
 import pandas as pd
 
-from .evaluation import align_representation, graph_metrics
 from .interventions import (
     classify_edge_interventions,
     estimate_all_effects,
 )
 from .predefined import predefined_representation
-from .reference_truth import reference_relations
 from .simulation import compile_indicator_dataset, trajectories
 from .temporal import (
     TemporalEdge,
@@ -33,42 +31,38 @@ from .temporal import (
 )
 
 
-def _intervention_f1(
-    scenario: str,
-    classifications: pd.DataFrame,
-    alignment: dict[str, Any],
-) -> float:
-    mapping = alignment["mapping"]
-    truth_pairs = {(item.source, item.target) for item in reference_relations(scenario)}
-    supported = {
-        (row.source, row.target)
-        for row in classifications.itertuples()
-        if row.primary_class == "supported"
-    }
-    aligned = {
-        (mapping[source], mapping[target])
-        for source, target in supported
-        if source in mapping and target in mapping
-    }
-    unmatched = sum(source not in mapping or target not in mapping for source, target in supported)
-    tp = len(aligned & truth_pairs)
-    fp = len(aligned - truth_pairs) + unmatched
-    fn = len(truth_pairs - aligned)
-    precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
-    return 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-
-
 def _metric_row(
     scenario: str,
     variant: str,
     graph: Sequence[TemporalEdge],
     representation: dict[str, Any],
 ) -> dict[str, Any]:
-    metrics, _ = graph_metrics(
-        scenario, graph, align_representation(representation, scenario)
-    )
-    return {"scenario": scenario, "variant": variant, **metrics}
+    candidates = len(representation_candidates(representation))
+    supports = [edge.support for edge in graph if np.isfinite(edge.support)]
+    lag_supports = [edge.lag_support for edge in graph if np.isfinite(edge.lag_support)]
+    lag_stds = [edge.lag_std for edge in graph if np.isfinite(edge.lag_std)]
+    return {
+        "evaluation_track": "full_discovery",
+        "scenario": scenario,
+        "variant": variant,
+        "candidate_edge_count": candidates,
+        "retained_edge_count": len(graph),
+        "temporal_qualification_rate": len(graph) / max(candidates, 1),
+        "stability": float(np.mean(supports)) if supports else np.nan,
+        "lag_support": float(np.mean(lag_supports)) if lag_supports else np.nan,
+        "lag_std": float(np.mean(lag_stds)) if lag_stds else np.nan,
+        "edge_f1": np.nan,
+        "shd": np.nan,
+        "lag_mae": np.nan,
+        "direction_accuracy": np.nan,
+        "reference_metric_reason": "not_applicable_without_generated_to_hidden_alignment",
+    }
+
+
+def _support_rate(frame: pd.DataFrame) -> float:
+    if frame.empty or "primary_class" not in frame.columns:
+        return float("nan")
+    return float(np.mean(frame["primary_class"] == "supported"))
 
 
 def run_functional_ablations(
@@ -91,37 +85,32 @@ def run_functional_ablations(
     )
     rows: list[dict[str, Any]] = []
     for scenario, representation in sorted(representations.items()):
-        alignment = align_representation(representation, scenario)
         full_row = main_results[
             (main_results["scenario"] == scenario)
             & (main_results["method"] == "full_method")
+            & (main_results["evaluation_track"] == "full_discovery")
         ].iloc[0].to_dict()
         full_row.update({"variant": "full_method"})
         rows.append(full_row)
-        vote_row = main_results[
+        single_row = main_results[
             (main_results["scenario"] == scenario)
-            & (main_results["method"] == "trajectory_vote")
+            & (main_results["method"] == "single_trajectory")
+            & (main_results["evaluation_track"] == "full_discovery")
         ].iloc[0].to_dict()
-        vote_row.update(
+        single_classes = classifications[
+            (classifications["scenario"] == scenario)
+            & (classifications["method"] == "single_trajectory")
+        ]
+        single_row.update(
             {
                 "variant": "without_joint_trajectories",
-                "intervention_f1": _intervention_f1(
-                    scenario,
-                    classify_edge_interventions(
-                        scenario,
-                        graphs[(scenario, "trajectory_vote")],
-                        effects,
-                        representation,
-                        int(config["intervention"]["lag_tolerance"]),
-                    ),
-                    alignment,
-                ),
+                "intervention_support_rate": _support_rate(single_classes),
                 "mean_ci_width": float(
                     effects[effects["scenario"] == scenario]["ci_width"].mean()
                 ),
             }
         )
-        rows.append(vote_row)
+        rows.append(single_row)
         point_graph = [
             TemporalEdge(**edge) for edge in bootstrap[scenario]["point_graph"]
         ]
@@ -130,16 +119,11 @@ def run_functional_ablations(
         )
         point_row.update(
             {
-                "intervention_f1": _intervention_f1(
-                    scenario,
+                "intervention_support_rate": _support_rate(
                     classify_edge_interventions(
-                        scenario,
-                        point_graph,
-                        effects,
-                        representation,
+                        scenario, point_graph, effects, representation,
                         int(config["intervention"]["lag_tolerance"]),
-                    ),
-                    alignment,
+                    )
                 ),
                 "mean_ci_width": float(
                     effects[effects["scenario"] == scenario]["ci_width"].mean()
@@ -147,25 +131,13 @@ def run_functional_ablations(
             }
         )
         rows.append(point_row)
-        rows.append(
-            {
-                "scenario": scenario,
-                "variant": "without_structured_representation",
-                "edge_precision": np.nan,
-                "edge_recall": np.nan,
-                "edge_f1": np.nan,
-                "shd": np.nan,
-                "lag_mae": np.nan,
-                "direction_accuracy": np.nan,
-                "stability": np.nan,
-                "retained_edge_count": np.nan,
-                "aligned_edge_count": np.nan,
-                "unmatched_predicted_edge_count": np.nan,
-                "intervention_f1": np.nan,
-                "mean_ci_width": np.nan,
-                "reason": "no executable indicator interface or defined intervention estimand",
-            }
-        )
+        unrestricted_row = main_results[
+            (main_results["scenario"] == scenario)
+            & (main_results["method"] == "unrestricted_temporal_search")
+            & (main_results["evaluation_track"] == "full_discovery")
+        ].iloc[0].to_dict()
+        unrestricted_row.update({"variant": "without_structured_representation"})
+        rows.append(unrestricted_row)
     unpaired_effects, _ = estimate_all_effects(
         complete_dataset,
         config,
@@ -186,11 +158,7 @@ def run_functional_ablations(
         )
         row.update(
             {
-                "intervention_f1": _intervention_f1(
-                    scenario,
-                    unpaired_classification,
-                    align_representation(representation, scenario),
-                ),
+                "intervention_support_rate": _support_rate(unpaired_classification),
                 "mean_ci_width": float(
                     unpaired_effects[unpaired_effects["scenario"] == scenario][
                         "ci_width"
@@ -230,7 +198,7 @@ def run_functional_ablations(
         row = _metric_row(
             scenario, "predefined_observable_baseline", fixed_graph, representation
         )
-        row.update({"intervention_f1": np.nan, "mean_ci_width": np.nan})
+        row.update({"intervention_support_rate": np.nan, "mean_ci_width": np.nan})
         rows.append(row)
     frame = pd.DataFrame(rows)
     frame.to_csv(run_root / "analysis" / "functional_ablations.csv", index=False)
@@ -238,16 +206,29 @@ def run_functional_ablations(
 
 
 def _bootstrap_metric_interval(
-    scenario: str,
     summary: dict[str, Any],
-    alignment: dict[str, Any],
     metric: str,
+    candidate_count: int,
 ) -> tuple[float, float]:
-    values = []
-    for item in summary["edge_sets"]:
-        graph = [TemporalEdge(**edge) for edge in item["edges"]]
-        metrics, _ = graph_metrics(scenario, graph, alignment)
-        values.append(metrics[metric])
+    edge_sets = [
+        {(edge["source"], edge["target"]) for edge in item["edges"]}
+        for item in summary["edge_sets"]
+    ]
+    frequencies: dict[tuple[str, str], float] = {}
+    for edges in edge_sets:
+        for pair in edges:
+            frequencies[pair] = frequencies.get(pair, 0.0) + 1.0 / max(len(edge_sets), 1)
+    values: list[float] = []
+    for pairs in edge_sets:
+        if metric == "temporal_qualification_rate":
+            values.append(len(pairs) / max(candidate_count, 1))
+        elif metric == "stability":
+            values.append(
+                float(np.mean([frequencies[pair] for pair in pairs]))
+                if pairs else 0.0
+            )
+        else:
+            raise KeyError(metric)
     finite = np.asarray(values, dtype=float)
     finite = finite[np.isfinite(finite)]
     if not len(finite):
@@ -274,7 +255,7 @@ def run_data_efficiency(
         by_seed = trajectories(baseline_dataset, scenario)
         all_frames = [by_seed[seed] for seed in sorted(by_seed)]
         candidates = representation_candidates(representation)
-        alignment = align_representation(representation, scenario)
+        candidate_count = len(candidates)
         for trajectory_count in config["evaluation"]["trajectory_counts"]:
             for repetition in range(
                 int(config["evaluation"]["repeated_subsampling_repetitions"])
@@ -306,12 +287,12 @@ def run_data_efficiency(
                     f"{scenario}:efficiency:{trajectory_count}:{repetition}",
                     workers,
                 )
-                metrics, _ = graph_metrics(scenario, graph, alignment)
+                metrics = _metric_row(scenario, "full_method", graph, representation)
                 edge_low, edge_high = _bootstrap_metric_interval(
-                    scenario, summary, alignment, "edge_f1"
+                    summary, "temporal_qualification_rate", candidate_count
                 )
                 stability_low, stability_high = _bootstrap_metric_interval(
-                    scenario, summary, alignment, "stability"
+                    summary, "stability", candidate_count
                 )
                 rows.append(
                     {
@@ -319,10 +300,10 @@ def run_data_efficiency(
                         "method": "full_method",
                         "trajectory_count": trajectory_count,
                         "repetition": repetition,
-                        "edge_f1": metrics["edge_f1"],
+                        "temporal_qualification_rate": metrics["temporal_qualification_rate"],
                         "stability": metrics["stability"],
-                        "edge_f1_ci_low": edge_low,
-                        "edge_f1_ci_high": edge_high,
+                        "temporal_qualification_rate_ci_low": edge_low,
+                        "temporal_qualification_rate_ci_high": edge_high,
                         "stability_ci_low": stability_low,
                         "stability_ci_high": stability_high,
                     }
@@ -335,17 +316,19 @@ def run_data_efficiency(
                     float(config["temporal"]["fdr_alpha"]),
                     float(config["temporal"]["vote_threshold"]),
                 )
-                vote_metrics, _ = graph_metrics(scenario, vote, alignment)
+                vote_metrics = _metric_row(
+                    scenario, "trajectory_vote", vote, representation
+                )
                 rows.append(
                     {
                         "scenario": scenario,
                         "method": "trajectory_vote",
                         "trajectory_count": trajectory_count,
                         "repetition": repetition,
-                        "edge_f1": vote_metrics["edge_f1"],
+                        "temporal_qualification_rate": vote_metrics["temporal_qualification_rate"],
                         "stability": vote_metrics["stability"],
-                        "edge_f1_ci_low": np.nan,
-                        "edge_f1_ci_high": np.nan,
+                        "temporal_qualification_rate_ci_low": np.nan,
+                        "temporal_qualification_rate_ci_high": np.nan,
                         "stability_ci_low": np.nan,
                         "stability_ci_high": np.nan,
                     }
@@ -378,7 +361,19 @@ def _perturb_frames(
         revised = frame.copy()
         values = revised.to_numpy(dtype=float)
         if noise > 0:
-            scales = np.nanstd(values, axis=0, ddof=1)
+            finite = np.isfinite(values)
+            counts = np.sum(finite, axis=0)
+            means = np.divide(
+                np.nansum(values, axis=0), counts,
+                out=np.zeros(values.shape[1], dtype=float), where=counts > 0,
+            )
+            squared = np.nansum((values - means[None, :]) ** 2, axis=0)
+            scales = np.sqrt(
+                np.divide(
+                    squared, counts - 1,
+                    out=np.zeros(values.shape[1], dtype=float), where=counts > 1,
+                )
+            )
             values += rng.normal(size=values.shape) * scales[None, :] * noise
         if missing > 0:
             mask = rng.random(values.shape) < missing
@@ -418,7 +413,6 @@ def run_observation_robustness(
     for scenario, representation in sorted(representations.items()):
         by_seed = trajectories(baseline_dataset, scenario)
         original_frames = [by_seed[seed] for seed in sorted(by_seed)]
-        alignment = align_representation(representation, scenario)
         candidates = representation_candidates(representation)
         for factor, noise, missing, threshold in conditions:
             for repetition in range(repetitions):
@@ -445,7 +439,9 @@ def run_observation_robustness(
                     f"{scenario}:{factor}:{noise}:{missing}:{threshold}:{repetition}",
                     workers,
                 )
-                metrics, _ = graph_metrics(scenario, graph, alignment)
+                metrics = _metric_row(
+                    scenario, factor, graph, representation
+                )
                 rows.append(
                     {
                         "scenario": scenario,
@@ -454,7 +450,7 @@ def run_observation_robustness(
                         "missing_fraction": missing,
                         "support_threshold": threshold,
                         "repetition": repetition,
-                        "edge_f1": metrics["edge_f1"],
+                        "temporal_qualification_rate": metrics["temporal_qualification_rate"],
                         "stability": metrics["stability"],
                         "retained_edge_count": len(graph),
                         "intervention_f1": np.nan,
@@ -560,7 +556,6 @@ def run_representation_robustness(
     for scenario, representation in sorted(representations.items()):
         by_seed = trajectories(baseline_dataset, scenario)
         original_frames = [by_seed[seed] for seed in sorted(by_seed)]
-        alignment = align_representation(representation, scenario)
         for operator in operators:
             for ratio in ratios:
                 for repetition in range(repetitions):
@@ -587,7 +582,9 @@ def run_representation_robustness(
                         f"{scenario}:{operator}:{ratio}:{repetition}",
                         workers,
                     )
-                    metrics, _ = graph_metrics(scenario, graph, alignment)
+                    metrics = _metric_row(
+                        scenario, operator, graph, representation
+                    )
                     rows.append(
                         {
                             "scenario": scenario,
@@ -631,8 +628,8 @@ def run_mechanism_checks(
             float(config["temporal"]["parent_alpha"]),
             float(config["temporal"]["fdr_alpha"]),
         )
-        metrics, _ = graph_metrics(
-            scenario, graph, align_representation(representation, scenario)
+        metrics = _metric_row(
+            scenario, "mechanism_disabled", graph, representation
         )
         rows.append(
             {

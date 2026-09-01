@@ -16,7 +16,8 @@ import pandas as pd
 
 from .dsl import compute_indicator
 from .raw_schemas import raw_schema
-from .simulators import run_scenario
+from .raw_schemas import HIDDEN_REFERENCE_FIELD_NAMES
+from .simulators import run_scenario_with_hidden
 
 
 METADATA_COLUMNS = {
@@ -55,6 +56,9 @@ class SimulationTask:
     scenario_spec: dict[str, Any]
     parameters: dict[str, float]
     raw_path: str
+    hidden_path: str
+    phase: str
+    formal_run: bool
 
 
 @dataclass(frozen=True)
@@ -63,36 +67,54 @@ class SimulationTaskResult:
     status: str
     raw_path: str
     sha256: str
+    hidden_path: str
+    hidden_sha256: str
     duration_seconds: float
     error: str | None
 
 
-def build_simulation_tasks(config: dict[str, Any], raw_root: Path) -> list[SimulationTask]:
+def build_simulation_tasks(
+    config: dict[str, Any],
+    raw_root: Path,
+    hidden_root: Path | None = None,
+    *,
+    phase: str = "all",
+) -> list[SimulationTask]:
+    if phase not in {"baseline", "intervention", "all"}:
+        raise ValueError(f"unknown simulation phase: {phase}")
+    hidden_root = hidden_root or raw_root.parent / "reference_hidden"
     tasks: list[SimulationTask] = []
     for scenario, spec in sorted(config["scenarios"].items()):
         baseline = {name: float(value) for name, value in spec["baseline"].items()}
-        conditions: list[tuple[str, str, str, str, dict[str, float]]] = [
-            ("baseline", "", "baseline", "baseline", baseline)
-        ]
+        conditions: list[tuple[str, str, str, str, dict[str, float]]] = []
+        if phase in {"baseline", "all"}:
+            conditions.append(("baseline", "", "baseline", "baseline", baseline))
+        if phase in {"intervention", "all"}:
+            intervention_conditions: list[tuple[str, str, str, str, dict[str, float]]] = []
+        else:
+            intervention_conditions = []
         for parameter, levels in sorted(spec["interventions"].items()):
             for direction, value in (("minus", levels[0]), ("plus", levels[2])):
                 revised = dict(baseline)
                 revised[parameter] = float(value)
-                conditions.append(
+                intervention_conditions.append(
                     (f"{parameter}_{direction}", parameter, direction, "baseline", revised)
                 )
-        conditions.append(
-            (
-                "mechanism_disabled",
-                "",
-                "disabled",
-                str(spec["mechanism_variant"]),
-                baseline,
+        if phase in {"intervention", "all"}:
+            intervention_conditions.append(
+                (
+                    "mechanism_disabled",
+                    "",
+                    "disabled",
+                    str(spec["mechanism_variant"]),
+                    baseline,
+                )
             )
-        )
+            conditions.extend(intervention_conditions)
         for condition, parameter, direction, mechanism, parameters in conditions:
             for seed in config["random_seeds"]:
                 raw_path = raw_root / scenario / condition / f"seed_{int(seed)}.npz"
+                hidden_path = hidden_root / scenario / condition / f"seed_{int(seed)}.npz"
                 tasks.append(
                     SimulationTask(
                         task_id=f"{scenario}:{condition}:{int(seed)}",
@@ -105,6 +127,9 @@ def build_simulation_tasks(config: dict[str, Any], raw_root: Path) -> list[Simul
                         scenario_spec=spec,
                         parameters=parameters,
                         raw_path=str(raw_path),
+                        hidden_path=str(hidden_path),
+                        phase="baseline" if condition == "baseline" else "intervention",
+                        formal_run=bool(config.get("formal_run", False)),
                     )
                 )
     return sorted(tasks, key=lambda item: item.task_id)
@@ -122,41 +147,67 @@ def execute_simulation_task(task: SimulationTask) -> SimulationTaskResult:
     started = time.perf_counter()
     path = Path(task.raw_path)
     sidecar = path.with_suffix(path.suffix + ".sha256")
+    hidden_path = Path(task.hidden_path)
+    hidden_sidecar = hidden_path.with_suffix(hidden_path.suffix + ".sha256")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
+        hidden_path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() or hidden_path.exists():
+            if not path.exists() or not hidden_path.exists():
+                raise RuntimeError("public/hidden checkpoint pair is incomplete")
             _verify_npz(path)
+            _verify_npz(hidden_path)
             actual = sha256_file(path)
-            if sidecar.exists():
-                expected = sidecar.read_text(encoding="ascii").strip()
-                if expected != actual:
-                    raise RuntimeError("existing raw file hash does not match its checkpoint")
-            else:
-                sidecar.write_text(actual + "\n", encoding="ascii")
+            hidden_actual = sha256_file(hidden_path)
+            if not sidecar.exists() or not hidden_sidecar.exists():
+                if task.formal_run:
+                    raise RuntimeError("formal existing NPZ requires its original sidecar")
+                raise RuntimeError("existing NPZ checkpoint pair requires sidecars")
+            expected = sidecar.read_text(encoding="ascii").strip()
+            hidden_expected = hidden_sidecar.read_text(encoding="ascii").strip()
+            if expected != actual or hidden_expected != hidden_actual:
+                raise RuntimeError("existing NPZ hash does not match its checkpoint")
+            with np.load(path, allow_pickle=False) as archive:
+                overlap = set(archive.files) & HIDDEN_REFERENCE_FIELD_NAMES
+            if overlap:
+                raise RuntimeError(f"public NPZ contains hidden fields: {sorted(overlap)}")
             return SimulationTaskResult(
-                task.task_id, "verified_existing", str(path), actual, time.perf_counter() - started, None
+                task.task_id, "verified_existing", str(path), actual,
+                str(hidden_path), hidden_actual, time.perf_counter() - started, None
             )
-        raw = run_scenario(
+        raw, hidden = run_scenario_with_hidden(
             task.scenario,
             task.seed,
             task.scenario_spec,
             task.parameters,
             task.mechanism_variant,
         )
+        overlap = set(raw) & (set(hidden) | HIDDEN_REFERENCE_FIELD_NAMES)
+        if overlap:
+            raise RuntimeError(f"public simulator payload contains hidden fields: {sorted(overlap)}")
         temporary = path.with_suffix(".tmp.npz")
+        hidden_temporary = hidden_path.with_suffix(".tmp.npz")
         np.savez_compressed(temporary, **raw)
+        np.savez_compressed(hidden_temporary, **hidden)
         _verify_npz(temporary)
+        _verify_npz(hidden_temporary)
         os.replace(temporary, path)
+        os.replace(hidden_temporary, hidden_path)
         digest = sha256_file(path)
+        hidden_digest = sha256_file(hidden_path)
         sidecar.write_text(digest + "\n", encoding="ascii")
+        hidden_sidecar.write_text(hidden_digest + "\n", encoding="ascii")
         return SimulationTaskResult(
-            task.task_id, "completed", str(path), digest, time.perf_counter() - started, None
+            task.task_id, "completed", str(path), digest,
+            str(hidden_path), hidden_digest, time.perf_counter() - started, None
         )
     except Exception as exc:
         return SimulationTaskResult(
             task.task_id,
             "failed",
             str(path),
+            "",
+            str(hidden_path),
             "",
             time.perf_counter() - started,
             f"{type(exc).__name__}: {exc}",
@@ -192,14 +243,19 @@ def run_simulation_stage(
     run_root: Path,
     workers: int,
     progress_callback: Callable[[str, int, int, str], None] | None = None,
+    *,
+    phase: str = "all",
 ) -> dict[str, Any]:
     data_root = run_root / "data"
     raw_root = data_root / "raw_logs"
-    tasks = build_simulation_tasks(config, raw_root)
+    hidden_root = data_root / "reference_hidden"
+    tasks = build_simulation_tasks(
+        config, raw_root, hidden_root, phase=phase
+    )
 
     def update(completed: int, total: int, result: SimulationTaskResult) -> None:
         if progress_callback:
-            progress_callback("Simulation", completed, total, result.task_id)
+            progress_callback(f"{phase.title()} simulation", completed, total, result.task_id)
 
     results = _run_jobs(execute_simulation_task, tasks, workers, update)
     failures = [item for item in results if item.status == "failed"]
@@ -217,11 +273,14 @@ def run_simulation_stage(
                 "duration_seconds": result.duration_seconds,
                 "error": result.error,
                 "raw_path": str(Path(result.raw_path).relative_to(run_root)),
+                "hidden_path": str(Path(result.hidden_path).relative_to(run_root)),
+                "hidden_sha256": result.hidden_sha256,
             }
         )
         task_records.append(record)
     manifest = {
         "schema_version": "1.0",
+        "phase": phase,
         "simulation_contract_sha256": sha256_json(
             {
                 "random_seeds": config["random_seeds"],
@@ -235,7 +294,7 @@ def run_simulation_stage(
         "task_records": task_records,
     }
     data_root.mkdir(parents=True, exist_ok=True)
-    manifest_path = data_root / "simulation_manifest.json"
+    manifest_path = data_root / f"{phase}_simulation_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     if failures:
         raise RuntimeError(
@@ -244,8 +303,26 @@ def run_simulation_stage(
     return manifest
 
 
-def verify_simulation_manifest(run_root: Path) -> None:
-    manifest_path = run_root / "data" / "simulation_manifest.json"
+def run_baseline_simulation_stage(
+    config: dict[str, Any], run_root: Path, workers: int,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    return run_simulation_stage(
+        config, run_root, workers, progress_callback, phase="baseline"
+    )
+
+
+def run_intervention_simulation_stage(
+    config: dict[str, Any], run_root: Path, workers: int,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    return run_simulation_stage(
+        config, run_root, workers, progress_callback, phase="intervention"
+    )
+
+
+def verify_simulation_manifest(run_root: Path, phase: str = "all") -> None:
+    manifest_path = run_root / "data" / f"{phase}_simulation_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     errors = []
     for record in manifest["task_records"]:
@@ -254,6 +331,11 @@ def verify_simulation_manifest(run_root: Path) -> None:
             errors.append(f"missing {record['raw_path']}")
         elif sha256_file(path) != record["sha256"]:
             errors.append(f"hash mismatch {record['raw_path']}")
+        hidden_path = run_root / record["hidden_path"]
+        if not hidden_path.is_file():
+            errors.append(f"missing {record['hidden_path']}")
+        elif sha256_file(hidden_path) != record["hidden_sha256"]:
+            errors.append(f"hash mismatch {record['hidden_path']}")
     if errors:
         raise RuntimeError("simulation manifest verification failed: " + "; ".join(errors[:10]))
 
@@ -315,6 +397,8 @@ def compile_indicator_dataset(
     output_path = data_root / f"{stem}.parquet"
     manifest_path = data_root / f"{stem}.manifest.json"
     representation_hash = sha256_json(representations)
+    if output_path.exists() != manifest_path.exists():
+        raise RuntimeError("saved indicator dataset checkpoint is incomplete")
     if output_path.exists() and manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("representation_sha256") != representation_hash:
@@ -322,12 +406,22 @@ def compile_indicator_dataset(
         if manifest.get("sha256") != sha256_file(output_path):
             raise RuntimeError("saved indicator dataset hash mismatch")
         return pd.read_parquet(output_path)
-    simulation_manifest = json.loads(
-        (data_root / "simulation_manifest.json").read_text(encoding="utf-8")
-    )
-    records = simulation_manifest["task_records"]
-    if not complete:
-        records = [item for item in records if item["condition"] == "baseline"]
+    phases = ["baseline", "intervention"] if complete else ["baseline"]
+    records: list[dict[str, Any]] = []
+    for phase in phases:
+        phase_path = data_root / f"{phase}_simulation_manifest.json"
+        if not phase_path.exists():
+            legacy = data_root / "all_simulation_manifest.json"
+            if legacy.exists():
+                phase_path = legacy
+            else:
+                raise FileNotFoundError(f"missing simulation phase manifest: {phase_path}")
+        phase_records = json.loads(phase_path.read_text(encoding="utf-8"))["task_records"]
+        if phase == "baseline":
+            phase_records = [item for item in phase_records if item["condition"] == "baseline"]
+        elif phase_path.name == "all_simulation_manifest.json":
+            phase_records = [item for item in phase_records if item["condition"] != "baseline"]
+        records.extend(phase_records)
     tasks = [
         IndicatorCompilationTask(
             scenario=item["scenario"],

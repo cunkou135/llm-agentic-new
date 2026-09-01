@@ -38,8 +38,12 @@ def validate_prospective_predictions(
             for edge in graphs[(scenario, "full_method")]
         }
         for prediction in scenario_predictions:
+            criteria = prediction["validation_criteria"]
             ordered = prediction["expected_temporal_order"]
-            expected_edges = list(zip(ordered[:-1], ordered[1:]))
+            expected_edges = [
+                (item["source"], item["target"])
+                for item in criteria["required_candidate_edges"]
+            ]
             observational_edges_retained = [pair in graph_pairs for pair in expected_edges]
             indicators = [prediction["source_indicator"], *prediction["downstream_indicators"]]
             expected_directions = [
@@ -54,7 +58,10 @@ def validate_prospective_predictions(
             ]
             lookup = {row.node_id: row for row in selected.itertuples()}
             source = lookup.get(prediction["source_indicator"])
-            if source is None or not bool(source.significant):
+            source_required = bool(criteria["required_source_response"])
+            downstream_required = list(criteria["required_downstream_response"])
+            order_required = bool(criteria["required_temporal_order"])
+            if source_required and (source is None or not bool(source.significant)):
                 classification = "manipulation_failure"
                 direction_matches: list[bool | None] = []
                 onset_order_supported = False
@@ -78,13 +85,26 @@ def validate_prospective_predictions(
                     len(finite_onsets) == len(onsets)
                     and np.all(np.diff(np.asarray(onsets)) >= 0)
                 )
+                downstream_responses_supported = all(
+                    (not required)
+                    or (
+                        lookup.get(indicator) is not None
+                        and bool(lookup[indicator].significant)
+                    )
+                    for indicator, required in zip(
+                        prediction["downstream_indicators"], downstream_required
+                    )
+                )
                 if any(value is False for value in direction_matches) or (
-                    significant_count == len(indicators) and not onset_order_supported
+                    significant_count == len(indicators)
+                    and order_required
+                    and not onset_order_supported
                 ):
                     classification = "contradicted"
                 elif (
                     all(value is True for value in direction_matches)
-                    and onset_order_supported
+                    and downstream_responses_supported
+                    and (onset_order_supported or not order_required)
                     and all(observational_edges_retained)
                 ):
                     classification = "supported"
@@ -123,4 +143,3 @@ def validate_prospective_predictions(
     frame = pd.DataFrame(rows)
     frame.to_csv(run_root / "analysis" / "prospective_validation.csv", index=False)
     return frame
-

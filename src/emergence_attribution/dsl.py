@@ -21,7 +21,10 @@ class ValueType:
     dimensions: tuple[str, ...]
 
 
-_REDUCERS = {"mean", "sum", "count", "fraction", "variance", "std", "quantile", "entropy"}
+_REDUCERS = {
+    "mean", "sum", "count", "fraction", "variance", "std", "quantile",
+    "entropy", "binned_entropy",
+}
 _BINARY = {"add", "subtract", "multiply", "divide", "safe_ratio", "distance"}
 _UNARY = {"abs", "negate", "sqrt", "log1p"}
 _COMPARISONS = {"greater", "greater_equal", "less", "less_equal", "equal", "not_equal"}
@@ -45,18 +48,104 @@ _OPERATORS.add("correlation")
 def grammar_description() -> dict[str, Any]:
     """Machine-readable grammar included in model prompts."""
 
+    contracts: dict[str, dict[str, Any]] = {}
+    for op in sorted(_OPERATORS):
+        required = ["op"]
+        optional: list[str] = []
+        types: dict[str, str] = {"op": "string literal"}
+        axis = "not applicable"
+        example: dict[str, Any] = {"op": op}
+        output = "inherits the validated input dimensions"
+        if op == "field":
+            required += ["name"]
+            types["name"] = "public raw field name"
+            example["name"] = "local_similarity"
+            output = "raw field dtype and dimensions"
+        elif op == "constant":
+            required += ["value"]
+            types["value"] = "finite number or boolean"
+            example["value"] = 0.5
+            output = "scalar"
+        elif op in _UNARY | {"clip", "time_difference", "rolling_mean"}:
+            required += ["input"]
+            types["input"] = "AST object"
+            example["input"] = {"op": "field", "name": "local_similarity"}
+            if op == "clip":
+                required += ["minimum", "maximum"]
+                types.update({"minimum": "number", "maximum": "number"})
+                example.update({"minimum": 0.0, "maximum": 1.0})
+            if op == "rolling_mean":
+                required += ["window"]
+                types["window"] = "positive integer"
+                example["window"] = 3
+        elif op in _BINARY | _COMPARISONS:
+            required += ["left", "right"]
+            types.update({"left": "AST object", "right": "AST object"})
+            example.update({
+                "left": {"op": "field", "name": "unhappy_count"},
+                "right": {"op": "constant", "value": 1},
+            })
+            output = "boolean dimensions" if op in _COMPARISONS else output
+        elif op in _REDUCERS:
+            required += ["input", "axis"]
+            types.update({"input": "AST object", "axis": "named input dimension"})
+            axis = "required; removed from output"
+            example.update({
+                "input": {"op": "field", "name": "local_similarity"},
+                "axis": "agent",
+            })
+            if op == "quantile":
+                required += ["q"]
+                types["q"] = "number in [0,1]"
+                example["q"] = 0.5
+            if op == "binned_entropy":
+                required += ["bins"]
+                types["bins"] = "integer in [2,128]"
+                example["bins"] = 10
+            output = "numeric input dimensions with axis removed"
+        elif op == "where":
+            required += ["condition", "input"]
+            types.update({"condition": "boolean AST object", "input": "AST object"})
+            example.update({
+                "condition": {"op": "field", "name": "unhappy"},
+                "input": {"op": "field", "name": "local_similarity"},
+            })
+        elif op == "select":
+            required += ["input", "axis", "index"]
+            types.update({"input": "AST object", "axis": "named input dimension", "index": "non-negative integer"})
+            axis = "required; selected and removed from output"
+            example.update({"input": {"op": "field", "name": "agent_position"}, "axis": "coordinate", "index": 0})
+        elif op == "correlation":
+            required += ["left", "right", "axis"]
+            types.update({"left": "numeric AST object", "right": "numeric AST object", "axis": "shared named dimension"})
+            axis = "required; removed from output"
+            example.update({"left": {"op": "field", "name": "state_opinion"}, "right": {"op": "field", "name": "agent_shift"}, "axis": "agent"})
+        elif op in {"connected_component_count", "largest_component_fraction", "spatial_neighbor_similarity"}:
+            required += ["input"]
+            types["input"] = "time-grid AST object"
+            example["input"] = {"op": "field", "name": "state_grid"}
+            output = "numeric [time]"
+        elif op == "network_assortativity":
+            required += ["values", "edges"]
+            types.update({"values": "numeric [time,agent] AST", "edges": "integer [edge,endpoint] AST"})
+            example.update({"values": {"op": "field", "name": "state_opinion"}, "edges": {"op": "field", "name": "network_edges"}})
+            output = "numeric [time]"
+        elif op == "network_density":
+            required += ["edges", "node_count"]
+            types.update({"edges": "integer [edge,endpoint] AST", "node_count": "scalar AST"})
+            example.update({"edges": {"op": "field", "name": "network_edges"}, "node_count": {"op": "field", "name": "agent_count"}})
+            output = "numeric scalar"
+        contracts[op] = {
+            "required": required,
+            "optional": optional,
+            "types": types,
+            "axis_semantics": axis,
+            "output": output,
+            "example": example,
+        }
     return {
         "ast_rule": "Every node is a JSON object with an op. No source code or expression strings are allowed.",
-        "operators": sorted(_OPERATORS),
-        "examples": [
-            {"op": "mean", "input": {"op": "field", "name": "local_similarity"}, "axis": "agent"},
-            {"op": "fraction", "input": {"op": "field", "name": "unhappy"}, "axis": "agent"},
-            {
-                "op": "std",
-                "input": {"op": "field", "name": "state_opinion"},
-                "axis": "agent",
-            },
-        ],
+        "operators": contracts,
         "required_output": "A scalar time series with dimensions [time].",
     }
 
@@ -65,7 +154,13 @@ def field_types(schema: Iterable[dict[str, Any]]) -> dict[str, ValueType]:
     result: dict[str, ValueType] = {}
     for item in schema:
         shape = tuple(str(value) for value in item["shape"] if isinstance(value, str))
-        dtype = "bool" if str(item["dtype"]) == "bool" else "numeric"
+        raw_dtype = str(item["dtype"]).lower()
+        if raw_dtype == "bool":
+            dtype = "bool"
+        elif raw_dtype.startswith(("int", "uint")):
+            dtype = "integer"
+        else:
+            dtype = "numeric"
         result[str(item["field_name"])] = ValueType(dtype, shape)
     return result
 
@@ -124,23 +219,32 @@ def validate_expression(expression: Any, fields: dict[str, ValueType]) -> ValueT
     if op == "constant":
         if not isinstance(expression.get("value"), (int, float, bool)):
             raise DSLValidationError("constant value must be numeric or boolean")
-        return ValueType("bool" if isinstance(expression["value"], bool) else "numeric", ())
+        if isinstance(expression["value"], bool):
+            dtype = "bool"
+        elif isinstance(expression["value"], int):
+            dtype = "integer"
+        else:
+            dtype = "numeric"
+        return ValueType(dtype, ())
     if op in _UNARY:
         value = validate_expression(expression.get("input"), fields)
-        if value.dtype != "numeric":
+        if value.dtype not in {"numeric", "integer"}:
             raise DSLValidationError(f"{op} requires numeric input")
         return value
     if op in _BINARY or op in _COMPARISONS:
         left = validate_expression(expression.get("left"), fields)
         right = validate_expression(expression.get("right"), fields)
         dimensions = _same_or_scalar(left, right)
-        if op not in _COMPARISONS and (left.dtype != "numeric" or right.dtype != "numeric"):
+        if op not in _COMPARISONS and (
+            left.dtype not in {"numeric", "integer"}
+            or right.dtype not in {"numeric", "integer"}
+        ):
             raise DSLValidationError(f"{op} requires numeric inputs")
         return ValueType("bool" if op in _COMPARISONS else "numeric", dimensions)
     if op == "correlation":
         left = validate_expression(expression.get("left"), fields)
         right = validate_expression(expression.get("right"), fields)
-        if left.dtype != "numeric" or right.dtype != "numeric":
+        if left.dtype not in {"numeric", "integer"} or right.dtype not in {"numeric", "integer"}:
             raise DSLValidationError("correlation requires numeric inputs")
         if left.dimensions != right.dimensions:
             raise DSLValidationError("correlation inputs must have equal dimensions")
@@ -155,7 +259,13 @@ def validate_expression(expression: Any, fields: dict[str, ValueType]) -> ValueT
         axis = expression.get("axis")
         if axis not in value.dimensions:
             raise DSLValidationError(f"axis {axis!r} is not present in {value.dimensions}")
-        if op not in {"count", "fraction"} and value.dtype != "numeric":
+        if op == "entropy" and value.dtype not in {"bool", "integer"}:
+            raise DSLValidationError(
+                "entropy accepts only categorical, boolean, or integer-like input; use binned_entropy for continuous values"
+            )
+        if op == "binned_entropy" and value.dtype not in {"numeric", "integer"}:
+            raise DSLValidationError("binned_entropy requires numeric input")
+        if op not in {"count", "fraction", "entropy", "binned_entropy"} and value.dtype not in {"numeric", "integer"}:
             raise DSLValidationError(f"{op} requires numeric input")
         dimensions = list(value.dimensions)
         dimensions.remove(axis)
@@ -163,10 +273,14 @@ def validate_expression(expression: Any, fields: dict[str, ValueType]) -> ValueT
             q = expression.get("q")
             if not isinstance(q, (int, float)) or not 0 <= float(q) <= 1:
                 raise DSLValidationError("quantile q must be within [0, 1]")
+        if op == "binned_entropy":
+            bins = expression.get("bins")
+            if isinstance(bins, bool) or not isinstance(bins, int) or not 2 <= bins <= 128:
+                raise DSLValidationError("binned_entropy bins must be an integer in [2, 128]")
         return ValueType("numeric", tuple(dimensions))
     if op == "clip":
         value = validate_expression(expression.get("input"), fields)
-        if value.dtype != "numeric":
+        if value.dtype not in {"numeric", "integer"}:
             raise DSLValidationError("clip requires numeric input")
         if not all(isinstance(expression.get(key), (int, float)) for key in ("minimum", "maximum")):
             raise DSLValidationError("clip requires numeric minimum and maximum")
@@ -182,7 +296,7 @@ def validate_expression(expression: Any, fields: dict[str, ValueType]) -> ValueT
         return value
     if op in {"time_difference", "rolling_mean"}:
         value = validate_expression(expression.get("input"), fields)
-        if value.dtype != "numeric" or "time" not in value.dimensions:
+        if value.dtype not in {"numeric", "integer"} or "time" not in value.dimensions:
             raise DSLValidationError(f"{op} requires numeric time-indexed input")
         if op == "rolling_mean" and (
             not isinstance(expression.get("window"), int) or expression["window"] < 1
@@ -229,7 +343,7 @@ def validate_expression(expression: Any, fields: dict[str, ValueType]) -> ValueT
 
 def validate_indicator_expression(expression: dict[str, Any], schema: Iterable[dict[str, Any]]) -> None:
     result = validate_expression(expression, field_types(schema))
-    if result.dimensions != ("time",) or result.dtype != "numeric":
+    if result.dimensions != ("time",) or result.dtype not in {"numeric", "integer"}:
         raise DSLValidationError(
             f"indicator computation must return numeric [time], got {result}"
         )
@@ -382,6 +496,21 @@ def execute_expression(
                     probabilities = counts / max(np.sum(counts), 1)
                     output[index] = -np.sum(probabilities * np.log(probabilities + 1e-15))
                 return output
+            if op == "binned_entropy":
+                array = np.asarray(values, dtype=float)
+                moved = np.moveaxis(array, axis, -1)
+                output = np.empty(moved.shape[:-1], dtype=float)
+                bins = int(node["bins"])
+                for index in np.ndindex(output.shape):
+                    row = moved[index]
+                    finite = row[np.isfinite(row)]
+                    if not finite.size or np.nanmin(finite) == np.nanmax(finite):
+                        output[index] = 0.0
+                        continue
+                    counts, _ = np.histogram(finite, bins=bins)
+                    probabilities = counts[counts > 0] / np.sum(counts)
+                    output[index] = -np.sum(probabilities * np.log(probabilities))
+                return output
         if op == "clip":
             return np.clip(run(node["input"]), float(node["minimum"]), float(node["maximum"]))
         if op == "where":
@@ -422,9 +551,26 @@ def execute_expression(
     return np.asarray(run(expression), dtype=float)
 
 
+def validate_temporal_aggregation(aggregation: dict[str, Any]) -> None:
+    if not isinstance(aggregation, dict):
+        raise DSLValidationError("temporal aggregation must be an object")
+    allowed = {"identity", "rolling_mean", "difference", "cumulative_mean"}
+    op = aggregation.get("op")
+    if op not in allowed:
+        raise DSLValidationError(f"illegal temporal aggregation: {op!r}")
+    extra = set(aggregation) - ({"op", "window"} if op == "rolling_mean" else {"op"})
+    if extra:
+        raise DSLValidationError(f"unexpected temporal aggregation fields: {sorted(extra)}")
+    if op == "rolling_mean":
+        window = aggregation.get("window")
+        if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+            raise DSLValidationError("temporal rolling_mean requires a positive integer window")
+
+
 def apply_temporal_aggregation(values: np.ndarray, aggregation: dict[str, Any]) -> np.ndarray:
     values = np.asarray(values, dtype=float)
-    op = aggregation.get("op", "identity")
+    validate_temporal_aggregation(aggregation)
+    op = aggregation["op"]
     if op == "identity":
         return values
     if op == "rolling_mean":

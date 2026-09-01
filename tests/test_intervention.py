@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
-from emergence_attribution.interventions import _effect_job, detect_onset
+from emergence_attribution.interventions import (
+    _effect_job,
+    classify_edge_interventions,
+    detect_onset,
+)
 
 
 def _config() -> dict:
@@ -46,3 +51,10 @@ def test_onset_detection_respects_start_and_consecutive_rule() -> None:
     significant = np.abs(values) >= 0.1
     assert detect_onset(values, significant, 0, 4) == 3
 
+
+def test_empty_graph_classification_has_stable_schema() -> None:
+    frame = classify_edge_interventions(
+        "toy", [], pd.DataFrame(), {"indicators": []}, lag_tolerance=2
+    )
+    assert frame.empty
+    assert {"scenario", "source", "target", "primary_class"}.issubset(frame.columns)

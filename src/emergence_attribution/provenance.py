@@ -36,7 +36,10 @@ def sha256_json(value: Any) -> str:
 
 def _source_files(project_root: Path) -> list[Path]:
     included_suffixes = {".py", ".json", ".toml", ".txt", ".md"}
-    excluded_parts = {"runs", ".venv", "__pycache__", ".pytest_cache", "build", "dist"}
+    excluded_parts = {
+        "runs", "smoke_runs", "dev_runs", ".venv", "__pycache__",
+        ".pytest_cache", "build", "dist",
+    }
     files = []
     for path in project_root.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in included_suffixes:
@@ -100,13 +103,20 @@ class RunManager:
         llm_config: dict[str, Any],
         *,
         resume: bool,
+        output_family: str = "runs",
     ) -> "RunManager":
         forbidden = "ca" + "mo"
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", run_id):
             raise RunContractError("run id contains unsupported characters")
         if forbidden in run_id.lower():
             raise RunContractError("run id contains a prohibited historical project name")
-        run_root = project_root / "runs" / run_id
+        if output_family not in {"runs", "dev_runs", "smoke_runs"}:
+            raise RunContractError("unsupported run output family")
+        if bool(config.get("formal_run", True)) and output_family != "runs":
+            raise RunContractError("formal outputs must be written below runs")
+        if not bool(config.get("formal_run", True)) and output_family == "runs":
+            raise RunContractError("non-scientific outputs must not be written below runs")
+        run_root = project_root / output_family / run_id
         manager = cls(project_root, run_root, config, llm_config, resume)
         if run_root.exists():
             if not resume:
@@ -155,6 +165,7 @@ class RunManager:
             "llm",
             "representation",
             "data/raw_logs",
+            "data/reference_hidden",
             "analysis",
             "visualization_input",
             "figures",
@@ -248,6 +259,15 @@ class RunManager:
         )
         self._write_timing_summary()
 
+    def record_timestamp(self, name: str) -> None:
+        """Record an auditable wall-clock boundary in the run manifest."""
+
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest.setdefault("event_timestamps", {})[name] = time.time()
+        self.manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
     def _write_timing_summary(self) -> None:
         stages = {}
         for path in sorted((self.run_root / "provenance" / "stages").glob("*.json")):
@@ -257,6 +277,27 @@ class RunManager:
             "stage_seconds": stages,
             "total_stage_seconds": sum(stages.values()),
         }
+        method_path = self.run_root / "analysis" / "method_runtime.csv"
+        if method_path.exists():
+            import csv
+
+            with method_path.open("r", encoding="utf-8", newline="") as handle:
+                method_rows = list(csv.DictReader(handle))
+            summary["method_runtime_seconds"] = method_rows
+            full = {
+                row["scenario"]: float(row["runtime_seconds"])
+                for row in method_rows
+                if row["method"] == "full_method"
+            }
+            summary["speedup_vs_full"] = [
+                {
+                    **row,
+                    "speedup": full.get(row["scenario"], float("nan"))
+                    / max(float(row["runtime_seconds"]), 1e-12),
+                }
+                for row in method_rows
+                if row.get("runtime_scope") == "temporal_analysis"
+            ]
         (self.run_root / "analysis" / "timing_summary.json").write_text(
             json.dumps(summary, indent=2), encoding="utf-8"
         )
@@ -295,4 +336,3 @@ class RunManager:
             "This run completed under an immutable contract. Create a new run id for any change.\n",
             encoding="utf-8",
         )
-

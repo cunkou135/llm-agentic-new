@@ -6,9 +6,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_forbidden_historical_name_absent_case_insensitively() -> None:
+def test_forbidden_name_zero_matches() -> None:
     forbidden = "ca" + "mo"
-    excluded = {".git", ".venv", "__pycache__", ".pytest_cache", "runs", "smoke_runs"}
+    excluded = {".git", ".venv", "__pycache__", ".pytest_cache", "runs", "smoke_runs", "dev_runs"}
     matches = []
     for path in PROJECT_ROOT.rglob("*"):
         if any(part in excluded for part in path.relative_to(PROJECT_ROOT).parts):
@@ -35,4 +35,3 @@ def test_reference_module_not_imported_by_inference_stages() -> None:
     ):
         text = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
         assert forbidden_import not in text
-

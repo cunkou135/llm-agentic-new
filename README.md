@@ -1,6 +1,6 @@
 # Reproducible multiscale emergence attribution experiments
 
-This is a new, self-contained scientific experiment implementation. It starts from simulator rules and raw logs, obtains executable multiscale semantic hypotheses and prospective predictions from one OpenAI-compatible API boundary, qualifies proposed temporal relations over repeated trajectories, tests propagation with matched-seed parameter interventions, and exports paper-data artifacts and Figure 2--8 inputs.
+This is the existing, self-contained scientific experiment implementation. It starts from simulator rules and public raw logs, freezes executable multiscale semantic hypotheses and prospective predictions before simulation, qualifies proposed temporal relations over repeated trajectories, tests propagation with matched-seed parameter interventions, and exports paper-data artifacts and Figure 2--8 inputs.
 
 The project keeps three evidence types separate:
 
@@ -28,7 +28,7 @@ python run_experiment.py `
   --llm-config config\llm_api.local.json `
   --run-id rerun_001 `
   --workers auto `
-  --no-render
+  --plot-repo "..\llm-agentic-dis"
 ```
 
 Resume an interrupted run by adding `--resume`. Generate Figure 2--8 afterward with `render_paper_figures.py`; see `RUNBOOK.md` for the exact commands and artifact map.
@@ -40,7 +40,8 @@ Resume an interrupted run by adding `--resume`. Generate Figure 2--8 afterward w
 - Model output is declarative JSON AST only; no generated code is evaluated.
 - All three independent generations, repairs, validation errors, and selection reasons are preserved.
 - Parameter associations are model-proposed and never inserted by a deterministic supervisor.
-- Reference structures are available only to simulator internals and final evaluation.
+- Withheld reference states are physically separated under `data/reference_hidden/` and are used only by the labelled Controlled Recovery track.
+- Full Discovery never aligns generated nodes to withheld reference identities and therefore reports no reference F1, SHD, lag MAE, or direction score.
 - The prospective prediction file is hashed before downstream analysis.
 - Source, configuration, prompt, API settings without the key, stage outputs, and final artifacts are hashed.
 - An existing run identifier is never silently overwritten.
@@ -54,4 +55,3 @@ python smoke_pipeline.py --run-id smoke_local --workers 1
 ```
 
 The first command runs unit tests. The second runs only the deterministic toy wiring path and must never be used as scientific evidence.
-

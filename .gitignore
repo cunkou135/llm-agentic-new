@@ -6,7 +6,8 @@ __pycache__/
 htmlcov/
 config/llm_api.local.json
 runs/
+dev_runs/
+smoke_runs/
 dist/
 build/
 *.egg-info/
-

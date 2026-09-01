@@ -28,9 +28,9 @@ Copy-Item config\llm_api.example.json config\llm_api.local.json
 
 只有 `src\emergence_attribution\llm_client.py` 会访问模型 API。local 文件已加入 `.gitignore`；provenance 只保存脱敏配置，不保存明文密钥。缺少密钥时 semantic stage 会直接失败，不会用 mock 替代正式输出。
 
-## 第二步：执行正式实验
+## 第二步：执行正式实验（唯一推荐命令）
 
-推荐先完成全部科学计算和导出，暂不绘图：
+该命令按冻结顺序一次完成语义、两段仿真、分析、导出与 Figure 2--8 渲染：
 
 ```powershell
 .\.venv\Scripts\python run_experiment.py `
@@ -38,27 +38,26 @@ Copy-Item config\llm_api.example.json config\llm_api.local.json
   --llm-config config\llm_api.local.json `
   --run-id rerun_001 `
   --workers auto `
-  --no-render
+  --plot-repo "..\llm-agentic-dis"
 ```
 
-也可以指定进程数：
+正式阶段顺序固定为：
 
-```powershell
-.\.venv\Scripts\python run_experiment.py `
-  --config config\experiment.json `
-  --llm-config config\llm_api.local.json `
-  --run-id rerun_001 `
-  --workers 12 `
-  --no-render
+```text
+semantic -> baseline_simulation -> temporal -> intervention_simulation -> intervention -> prospective -> robustness -> export -> render
 ```
 
-单独运行某一 stage：
+如需显式指定 12 个进程，可把 `--workers auto` 改为 `--workers 12`。`auto` 会采用 `min(cpu-1, 12)` 的内存友好上限。
+
+用于故障恢复的分阶段命令如下；正常首次运行不要使用这些命令：
 
 ```powershell
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage simulation
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage semantic --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage semantic
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage baseline_simulation --resume
 .\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage temporal --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage intervention_simulation --resume
 .\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage intervention --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage prospective --resume
 .\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage robustness --resume
 .\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage export --resume
 ```
@@ -86,7 +85,7 @@ runs\rerun_001\logs\progress.jsonl
   --run-id rerun_001 `
   --workers auto `
   --resume `
-  --no-render
+  --plot-repo "..\llm-agentic-dis"
 ```
 
 程序会核对 source/config/API-public-config/stage artifact hashes。已经验证成功的 task 或 stage 会跳过；hash 不一致会 fail closed，并要求新 run-id。不要手工修改 run 内 CSV、JSON、Parquet、NPZ 或图数据。
@@ -105,15 +104,19 @@ runs\rerun_001\
 - `provenance\`：run/source/stage manifests、环境、全部 artifact SHA256。
 - `llm\`：两个场景各三代的 prompt、request、response、repair 和 validation。
 - `representation\`：最终表征、agreement、validation、冻结 prospective predictions。
-- `data\raw_logs\`：新运行生成的 384 个正式原始仿真文件。
+- `data\raw_logs\`：384 个仅含公开字段的正式原始仿真文件。
+- `data\reference_hidden\`：与公开 NPZ 物理隔离的 Controlled Recovery 隐藏参考文件；不得提供给语义生成或 Full Discovery。
 - `data\indicator_trajectories_*.parquet`：由冻结表征计算的 baseline/complete 指标轨迹。
-- `analysis\`：temporal、bootstrap、paired effects、intervention、robustness、prospective validation 和 attribution objects。
+- `analysis\full_discovery_results.csv`：不含隐藏真值对齐指标的发现轨结果。
+- `analysis\controlled_recovery_results.csv`：固定隐藏已知基准上的恢复指标。
+- `analysis\main_results.csv`：带 `evaluation_track` 标签的合并索引表。
+- `analysis\`：其余 temporal、bootstrap、paired effects、intervention、robustness、prospective validation 和 attribution objects。
 - `visualization_input\`：Figure 2--8 的动态输入 bundle。
 - `figures\`、`tables\`：论文图和表格 source data。
 
 ## 第六步：生成 Figure 2--8
 
-从新 run 动态绘图，并读取本地绘图库的 export style 设置：
+若正式命令因 `--no-render` 或渲染故障停在绘图前，可从冻结输入动态补绘：
 
 ```powershell
 .\.venv\Scripts\python render_paper_figures.py `
@@ -132,13 +135,15 @@ runs\rerun_001\
   --plot-repo "..\llm-agentic-dis"
 ```
 
-该命令写入绘图库的 `data\generated_runs\rerun_001\`；若目标已存在会拒绝覆盖。
+该命令写入绘图库的 `data\generated_runs\rerun_001\`；若目标已存在会拒绝覆盖。科学绘图参数只读取 run 内冻结配置；本地绘图库仅作为原始视觉语言的已校验参考。
 
 ## 第七步：可直接用于论文的文件
 
 优先使用：
 
 - `analysis\main_results.csv`
+- `analysis\full_discovery_results.csv`
+- `analysis\controlled_recovery_results.csv`
 - `analysis\main_graphs.jsonl`
 - `analysis\data_efficiency_repeated_subsampling.csv`
 - `analysis\paired_effects.parquet`

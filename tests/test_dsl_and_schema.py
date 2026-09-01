@@ -10,6 +10,8 @@ from pydantic import ValidationError
 from emergence_attribution.dsl import (
     DSLValidationError,
     compute_indicator,
+    grammar_description,
+    validate_temporal_aggregation,
     validate_indicator_expression,
 )
 from emergence_attribution.pipeline import load_experiment_config
@@ -93,6 +95,15 @@ def _valid_toy_generation() -> dict:
                 "downstream_indicators": ["toy_meso", "toy_macro"],
                 "expected_downstream_direction": ["increase", "increase"],
                 "expected_temporal_order": ["toy_micro", "toy_meso", "toy_macro"],
+                "validation_criteria": {
+                    "required_source_response": True,
+                    "required_downstream_response": [True, True],
+                    "required_temporal_order": True,
+                    "required_candidate_edges": [
+                        {"source": "toy_micro", "target": "toy_meso"},
+                        {"source": "toy_meso", "target": "toy_macro"}
+                    ]
+                },
                 "scientific_rationale": "The toy prediction exercises prospective validation wiring.",
                 "falsification_condition": "The source is changed but downstream direction or order fails.",
             }
@@ -110,6 +121,8 @@ def test_structured_schema_accepts_complete_generation() -> None:
             "budget": {"micro": 1, "meso": 1, "macro": 1},
             "required_branch_count": 1,
             "require_all_parameters_associated": True,
+            "minimum_candidate_edges": 2,
+            "maximum_candidate_edges": 2,
         },
     )
     assert validation["valid"], validation["errors"]
@@ -156,3 +169,29 @@ def test_prompt_contains_no_evaluation_leakage() -> None:
     ]
     assert not any(value in combined for value in forbidden)
 
+
+def test_temporal_aggregation_contract_is_strict() -> None:
+    validate_temporal_aggregation({"op": "rolling_mean", "window": 3})
+    with pytest.raises(DSLValidationError, match="positive integer"):
+        validate_temporal_aggregation({"op": "rolling_mean", "window": 0})
+    with pytest.raises(DSLValidationError, match="unexpected"):
+        validate_temporal_aggregation({"op": "identity", "window": 2})
+
+
+def test_continuous_entropy_requires_binning() -> None:
+    expression = {
+        "op": "entropy",
+        "input": {"op": "field", "name": "x"},
+        "axis": "agent",
+    }
+    with pytest.raises(DSLValidationError, match="binned_entropy"):
+        validate_indicator_expression(expression, raw_schema("toy"))
+
+
+def test_grammar_documents_each_operator_contract() -> None:
+    operators = grammar_description()["operators"]
+    assert operators
+    for contract in operators.values():
+        assert set(contract) == {
+            "required", "optional", "types", "axis_semantics", "output", "example"
+        }
