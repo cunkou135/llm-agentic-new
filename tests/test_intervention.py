@@ -46,6 +46,46 @@ def test_paired_intervention_preserves_raw_and_standardised_effects() -> None:
     assert summary["paired"] is True
 
 
+def test_zero_baseline_sd_keeps_raw_effect_but_standardised_is_not_estimable() -> None:
+    baseline = np.zeros((8, 40, 2), dtype=float)
+    baseline[:, :, 1] = np.linspace(0, 1, 40)[None, :]
+    baseline[:, :, 1] += np.arange(8)[:, None] * 0.01
+    intervention = baseline + np.asarray([0.5, 0.2])[None, None, :]
+    result = _effect_job(
+        {
+            "scenario": "toy",
+            "parameter": "strength",
+            "direction": "plus",
+            "node_ids": ["constant", "variable"],
+            "scales": {"constant": "micro", "variable": "meso"},
+            "baseline": baseline,
+            "intervention": intervention,
+            "config": _config(),
+            "paired": True,
+            "seed": 45,
+        }
+    )
+    constant = result["summaries"][0]
+    assert constant["baseline_sd"] == 0.0
+    assert np.isclose(constant["cumulative_effect_raw"], 0.5)
+    assert np.isnan(constant["cumulative_effect_standardised"])
+    assert np.isnan(constant["cumulative_effect"])
+    assert np.isnan(constant["cumulative_ci_low_standardised"])
+    assert np.isnan(constant["cumulative_ci_high_standardised"])
+    assert np.isnan(constant["terminal_effect_standardised"])
+    assert constant["significant"] is False
+    assert constant["onset_time"] == -1
+    assert constant["peak_time"] == -1
+    constant_curves = [
+        row for row in result["curves"] if row["node_id"] == "constant"
+    ]
+    assert all(np.isnan(row["mean_standardised"]) for row in constant_curves)
+    assert all(np.isclose(row["mean_raw"], 0.5) for row in constant_curves)
+    variable = result["summaries"][1]
+    assert variable["baseline_sd"] > 0
+    assert np.isfinite(variable["cumulative_effect_standardised"])
+
+
 def test_onset_detection_respects_start_and_consecutive_rule() -> None:
     values = np.asarray([0.2, 0.2, 0.0, 0.3, 0.3, 0.3, 0.3])
     significant = np.abs(values) >= 0.1

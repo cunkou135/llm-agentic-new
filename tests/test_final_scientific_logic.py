@@ -305,3 +305,39 @@ def test_figure7_filters_incomplete_or_unordered_paths() -> None:
         {"scenario": "toy", "method": "full_method", "parameter": "theta", "direction": "plus", "source": "meso_b", "target": "macro_c", "primary_class": "supported"},
     ])
     assert eligible_propagation_path_ids(timing, classifications) == {"valid"}
+
+
+def test_propagation_path_cannot_borrow_support_from_another_direction() -> None:
+    timing = pd.DataFrame([
+        {
+            "scenario": "toy", "path_id": "theta:plus:path", "parameter": "theta",
+            "direction": "plus", "source": "micro_a", "meso": "meso_b",
+            "macro": "macro_c", "scale": scale, "onset_time": onset,
+            "significant": True, "cumulative_effect": 0.5,
+        }
+        for scale, onset in (("micro", 1), ("meso", 2), ("macro", 3))
+    ])
+    classifications = pd.DataFrame([
+        {
+            "scenario": "toy", "method": "full_method", "parameter": "theta",
+            "direction": "plus", "source": "micro_a", "target": "meso_b",
+            "primary_class": "supported",
+        },
+        {
+            "scenario": "toy", "method": "full_method", "parameter": "theta",
+            "direction": "plus", "source": "meso_b", "target": "macro_c",
+            "primary_class": "manipulation_failure",
+        },
+        {
+            "scenario": "toy", "method": "full_method", "parameter": "theta",
+            "direction": "minus", "source": "meso_b", "target": "macro_c",
+            "primary_class": "supported",
+        },
+    ])
+    assert eligible_propagation_path_ids(timing, classifications) == set()
+    classifications.loc[
+        classifications["direction"] == "plus", "primary_class"
+    ] = "supported"
+    assert eligible_propagation_path_ids(timing, classifications) == {
+        "theta:plus:path"
+    }

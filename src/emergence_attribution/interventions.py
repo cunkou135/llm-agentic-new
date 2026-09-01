@@ -178,20 +178,40 @@ def _effect_job(payload: dict[str, Any]) -> dict[str, Any]:
         axis=0,
         ddof=1,
     )
-    baseline_sd = np.where(np.isfinite(baseline_sd) & (baseline_sd > 1e-12), baseline_sd, 1.0)
-    standardised = raw_difference / baseline_sd[None, None, :]
+    estimable = np.isfinite(baseline_sd) & (baseline_sd > 1e-12)
+    standardised = np.full_like(raw_difference, np.nan, dtype=float)
+    standardised[:, :, estimable] = (
+        raw_difference[:, :, estimable]
+        / baseline_sd[None, None, estimable]
+    )
     repetitions = int(config["bootstrap_repetitions"])
     rng = np.random.default_rng(payload["seed"])
     indices = rng.integers(0, len(baseline), size=(repetitions, len(baseline)))
     bootstrap_raw = np.mean(raw_difference[indices], axis=1)
-    bootstrap_standardised = np.mean(standardised[indices], axis=1)
+    bootstrap_standardised = np.full(
+        (repetitions, raw_difference.shape[1], raw_difference.shape[2]),
+        np.nan,
+        dtype=float,
+    )
+    bootstrap_standardised[:, :, estimable] = np.mean(
+        standardised[indices][:, :, :, estimable], axis=1
+    )
     mean_raw = np.mean(raw_difference, axis=0)
-    mean_standardised = np.mean(standardised, axis=0)
+    mean_standardised = np.full_like(mean_raw, np.nan, dtype=float)
+    mean_standardised[:, estimable] = np.mean(
+        standardised[:, :, estimable], axis=0
+    )
     alpha = (1.0 - float(config["confidence_level"])) / 2.0
     low_raw = np.quantile(bootstrap_raw, alpha, axis=0)
     high_raw = np.quantile(bootstrap_raw, 1.0 - alpha, axis=0)
-    low_standardised = np.quantile(bootstrap_standardised, alpha, axis=0)
-    high_standardised = np.quantile(bootstrap_standardised, 1.0 - alpha, axis=0)
+    low_standardised = np.full_like(mean_raw, np.nan, dtype=float)
+    high_standardised = np.full_like(mean_raw, np.nan, dtype=float)
+    low_standardised[:, estimable] = np.quantile(
+        bootstrap_standardised[:, :, estimable], alpha, axis=0
+    )
+    high_standardised[:, estimable] = np.quantile(
+        bootstrap_standardised[:, :, estimable], 1.0 - alpha, axis=0
+    )
     threshold = float(config["minimum_standardised_effect"])
     onset_start = int(config["onset_detection_start"])
     consecutive = int(config["onset_consecutive_steps"])
@@ -199,65 +219,87 @@ def _effect_job(payload: dict[str, Any]) -> dict[str, Any]:
     summaries: list[dict[str, Any]] = []
     curves: list[dict[str, Any]] = []
     for node_index, node_id in enumerate(node_ids):
-        significant_curve = (low_standardised[:, node_index] > threshold) | (
-            high_standardised[:, node_index] < -threshold
-        )
-        onset = detect_onset(
-            mean_standardised[:, node_index], significant_curve, onset_start, consecutive
-        )
-        onset_samples = np.asarray(
-            [
-                detect_onset(
-                    curve[:, node_index],
-                    np.abs(curve[:, node_index]) >= threshold,
-                    onset_start,
-                    consecutive,
-                )
-                for curve in bootstrap_standardised
-            ]
-        )
-        valid_onsets = onset_samples[onset_samples >= 0]
-        onset_low = float(np.quantile(valid_onsets, alpha)) if len(valid_onsets) else float("nan")
-        onset_high = (
-            float(np.quantile(valid_onsets, 1.0 - alpha))
-            if len(valid_onsets)
-            else float("nan")
-        )
+        node_estimable = bool(estimable[node_index])
+        if node_estimable:
+            significant_curve = (low_standardised[:, node_index] > threshold) | (
+                high_standardised[:, node_index] < -threshold
+            )
+            onset = detect_onset(
+                mean_standardised[:, node_index], significant_curve,
+                onset_start, consecutive,
+            )
+            onset_samples = np.asarray(
+                [
+                    detect_onset(
+                        curve[:, node_index],
+                        np.abs(curve[:, node_index]) >= threshold,
+                        onset_start,
+                        consecutive,
+                    )
+                    for curve in bootstrap_standardised
+                ]
+            )
+            valid_onsets = onset_samples[onset_samples >= 0]
+            onset_low = (
+                float(np.quantile(valid_onsets, alpha))
+                if len(valid_onsets) else float("nan")
+            )
+            onset_high = (
+                float(np.quantile(valid_onsets, 1.0 - alpha))
+                if len(valid_onsets) else float("nan")
+            )
+        else:
+            onset = -1
+            onset_low = onset_high = float("nan")
         raw_by_seed = np.mean(raw_difference[:, evaluation_start:, node_index], axis=1)
-        standardised_by_seed = np.mean(
-            standardised[:, evaluation_start:, node_index], axis=1
-        )
         cumulative_raw = float(np.mean(raw_by_seed))
-        cumulative_standardised = float(np.mean(standardised_by_seed))
         boot_cumulative_raw = np.mean(
             bootstrap_raw[:, evaluation_start:, node_index], axis=1
         )
-        boot_cumulative_standardised = np.mean(
-            bootstrap_standardised[:, evaluation_start:, node_index], axis=1
-        )
         cumulative_low_raw = float(np.quantile(boot_cumulative_raw, alpha))
         cumulative_high_raw = float(np.quantile(boot_cumulative_raw, 1.0 - alpha))
-        cumulative_low_standardised = float(
-            np.quantile(boot_cumulative_standardised, alpha)
-        )
-        cumulative_high_standardised = float(
-            np.quantile(boot_cumulative_standardised, 1.0 - alpha)
-        )
-        is_significant = bool(
-            onset >= 0
-            and (
-                cumulative_low_standardised > threshold
-                or cumulative_high_standardised < -threshold
+        if node_estimable:
+            standardised_by_seed = np.mean(
+                standardised[:, evaluation_start:, node_index], axis=1
             )
-        )
-        peak_time = int(
-            evaluation_start
-            + np.argmax(np.abs(mean_standardised[evaluation_start:, node_index]))
-        )
-        sign = int(np.sign(cumulative_standardised))
-        consistency = (
-            float(np.mean(np.sign(standardised_by_seed) == sign)) if sign else 0.0
-        )
+            cumulative_standardised = float(np.mean(standardised_by_seed))
+            boot_cumulative_standardised = np.mean(
+                bootstrap_standardised[:, evaluation_start:, node_index], axis=1
+            )
+            cumulative_low_standardised = float(
+                np.quantile(boot_cumulative_standardised, alpha)
+            )
+            cumulative_high_standardised = float(
+                np.quantile(boot_cumulative_standardised, 1.0 - alpha)
+            )
+            is_significant = bool(
+                onset >= 0
+                and (
+                    cumulative_low_standardised > threshold
+                    or cumulative_high_standardised < -threshold
+                )
+            )
+            peak_time = int(
+                evaluation_start
+                + np.argmax(np.abs(mean_standardised[evaluation_start:, node_index]))
+            )
+            sign = int(np.sign(cumulative_standardised))
+            consistency = (
+                float(np.mean(np.sign(standardised_by_seed) == sign))
+                if sign else 0.0
+            )
+            terminal_standardised = float(
+                np.mean(mean_standardised[-terminal_window:, node_index])
+            )
+        else:
+            cumulative_standardised = float("nan")
+            cumulative_low_standardised = float("nan")
+            cumulative_high_standardised = float("nan")
+            is_significant = False
+            peak_time = -1
+            sign = 0
+            consistency = float("nan")
+            terminal_standardised = float("nan")
         summary = EffectSummary(
             scenario=scenario,
             parameter=parameter,
@@ -277,9 +319,7 @@ def _effect_job(payload: dict[str, Any]) -> dict[str, Any]:
             onset_time=onset,
             onset_ci_low=onset_low,
             onset_ci_high=onset_high,
-            terminal_effect_standardised=float(
-                np.mean(mean_standardised[-terminal_window:, node_index])
-            ),
+            terminal_effect_standardised=terminal_standardised,
             significant=is_significant,
             effect_sign=sign,
             paired_seed_sign_consistency=consistency,
@@ -712,19 +752,13 @@ def eligible_propagation_path_ids(
 ) -> set[str]:
     """Select complete, significant, ordered, intervention-supported paths."""
 
-    supported: set[tuple[str, str, str]] | None = None
     if classifications is not None:
-        required = {"scenario", "parameter", "direction", "source", "target", "primary_class"}
+        required = {
+            "scenario", "method", "parameter", "direction",
+            "source", "target", "primary_class",
+        }
         if not required.issubset(classifications.columns):
             raise ValueError("intervention classifications lack propagation-filter columns")
-        evidence = aggregate_edge_intervention_evidence(classifications)
-        if "method" in evidence.columns:
-            evidence = evidence[evidence["method"] == "full_method"]
-        evidence = evidence[evidence["edge_class"].isin(allowed_classes)]
-        supported = {
-            (str(row.scenario), str(row.source), str(row.target))
-            for row in evidence.itertuples()
-        }
     valid_ids: set[str] = set()
     for path_id, group in path_summary.groupby("path_id"):
         order = group.sort_values(
@@ -739,15 +773,26 @@ def eligible_propagation_path_ids(
             and np.all(np.diff(onsets) >= 0)
         ):
             continue
-        if supported is not None:
+        if classifications is not None:
             first = order.iloc[0]
+            scenario = str(first["scenario"])
+            parameter = str(first["parameter"])
+            direction = str(first["direction"])
+            subset = classifications[
+                (classifications["scenario"].astype(str) == scenario)
+                & (classifications["method"] == "full_method")
+                & (classifications["parameter"].astype(str) == parameter)
+                & (classifications["direction"].astype(str) == direction)
+            ]
+            evidence = aggregate_edge_intervention_evidence(subset)
+            supported = {
+                (str(row.source), str(row.target))
+                for row in evidence.itertuples()
+                if row.edge_class in allowed_classes
+            }
             keys = {
-                (
-                    str(first["scenario"]), str(first["source"]), str(first["meso"]),
-                ),
-                (
-                    str(first["scenario"]), str(first["meso"]), str(first["macro"]),
-                ),
+                (str(first["source"]), str(first["meso"])),
+                (str(first["meso"]), str(first["macro"])),
             }
             if not keys.issubset(supported):
                 continue

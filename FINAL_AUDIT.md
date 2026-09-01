@@ -17,6 +17,8 @@ paired bootstrap suite was run. All cited executions are NON_SCIENTIFIC.
 | Prospective exact required path | Required edges could contain missing or extra relations. | The expected path only had to be included. | Required edges must exactly equal adjacent frozen temporal-order edges and all must be candidate edges. | Exact, missing, extra, and non-candidate cases | PASS |
 | Random perturbation repetitions | Cross-branch errors could reuse the same prefix in every repetition. | `eligible[:count]` made repeated error sets identical. | Seeded sampling without replacement is deterministic within a repetition and distinct across repetitions; all other perturbation operators were also checked. | Cross-branch and all-operator repetition tests; dev candidate-set hashes | PASS |
 | Edge-level intervention aggregation | One support could hide an explicit contradiction. | Controlled F1 accepted any supported attempt. | `not_applicable` is excluded; contradiction precedes support; otherwise one support is sufficient; all failures remain failure; downstream-effect absence then inconclusive follow. Full Discovery, Controlled Recovery, Figure 7 filtering, and summaries reuse this rule. | Aggregation precedence and Controlled F1 tests; dev edge-output gate | PASS |
+| Condition-specific propagation validation | Path validation could borrow edge support from another parameter or intervention direction. | Evidence was collapsed across `parameter` and `direction` before checking a path. | Each path now requires both edges to be supported under its own `scenario + parameter + direction + full_method` subset. | Cross-direction evidence-isolation regression test | PASS |
+| Zero baseline variance | A zero or invalid baseline SD was replaced by 1, creating an artificial standardised effect. | Non-estimable indicators received a finite standardised effect. | Raw effects remain available; standardised effects and intervals are NaN, significance is false, and onset/peak are -1. | Mixed estimable/non-estimable effect regression test | PASS |
 | Robustness multiprocessing lifecycle | Every robustness fit could create and destroy a Windows process pool. | Development-shaped workload implied 60 pool lifecycles. | One reusable outer pool executes condition jobs; each bootstrap job uses one inner worker; nested pools are prohibited. Statistical settings are unchanged. | workers=1/workers=N equality and performance smoke | PASS |
 
 ## Method wording and unchanged contracts
@@ -41,7 +43,7 @@ estimator or threshold was changed.
 
 ## NON_SCIENTIFIC verification
 
-- Pytest: 88 passed.
+- Pytest: 90 passed.
 - Toy smoke: PASS, `smoke_runs/final_prerun_20260902_01/`.
 - Two-scenario dev E2E: PASS,
   `dev_runs/final_prerun_20260902_01/`; every stage from semantic through render
