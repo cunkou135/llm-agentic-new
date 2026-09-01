@@ -10,6 +10,12 @@ The project keeps three evidence types separate:
 
 A temporally qualified relation is not labelled as an unrestricted causal relation.
 
+Stage 3 changes simulator parameters only.  Direct Micro->Meso evidence uses
+`parameter -> Micro -> Meso`; Meso->Macro evidence reuses the same upstream
+Micro manipulation root and is labelled `upstream_mediated`.  Generated Micro,
+Meso, and Macro indicators are observed from the matched-seed trajectories and
+are never directly edited.
+
 ## Formal run
 
 Create an environment and install the project:
@@ -31,7 +37,11 @@ python run_experiment.py `
   --plot-repo "..\llm-agentic-dis"
 ```
 
-Resume an interrupted run by adding `--resume`. Generate Figure 2--8 afterward with `render_paper_figures.py`; see `RUNBOOK.md` for the exact commands and artifact map.
+Resume an interrupted run by adding `--resume`. Accepted semantic generations
+are skipped only after their request, response, accepted payload, and result
+hashes verify; existing LLM history is append-only. Generate Figure 2--8
+afterward with `render_paper_figures.py`; see `RUNBOOK.md` for the exact commands
+and artifact map.
 
 ## Integrity gates
 
@@ -43,6 +53,10 @@ Resume an interrupted run by adding `--resume`. Generate Figure 2--8 afterward w
 - Withheld reference states are physically separated under `data/reference_hidden/` and are used only by the labelled Controlled Recovery track.
 - Full Discovery never aligns generated nodes to withheld reference identities and therefore reports no reference F1, SHD, lag MAE, or direction score.
 - The prospective prediction file is hashed before downstream analysis.
+- Missing required prospective responses, wrong directions, temporal-order
+  violations, and missing required observational edges are falsifications.
+- `analysis/attribution_objects.json` integrates `full_method` evidence only;
+  other methods are exported separately for comparison.
 - Source, configuration, prompt, API settings without the key, stage outputs, and final artifacts are hashed.
 - An existing run identifier is never silently overwritten.
 - Toy smoke outputs are physically separate and explicitly marked non-scientific.

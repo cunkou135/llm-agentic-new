@@ -239,7 +239,12 @@ def run_stage(
             "table_count": len(tables), "figure_input_count": len(bundle["figures"]),
         }
         outputs = [
-            path for path in _files(run_root, ["analysis/attribution_objects.json", "tables/*", "visualization_input/**/*"])
+            path for path in _files(run_root, [
+                "analysis/attribution_objects.json",
+                "analysis/comparative_method_intervention_evidence.csv",
+                "tables/*",
+                "visualization_input/**/*",
+            ])
             if path != run_root / "visualization_input" / "render_manifest.json"
         ]
     elif stage == "render":

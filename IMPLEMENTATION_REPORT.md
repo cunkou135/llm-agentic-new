@@ -23,7 +23,7 @@ The selected semantic representation and structured prospective criteria are fro
 
 `analysis/full_discovery_results.csv` reports executability, graph coverage, temporal qualification, bootstrap stability, lag stability, intervention support/contradiction, prospective validation, robustness, and runtime. Hidden-reference Edge F1, SHD, lag MAE, and direction accuracy are always missing with an explicit reason.
 
-`analysis/controlled_recovery_results.csv` reports Edge F1, SHD, lag MAE, direction accuracy, stability, intervention F1, uncertainty width, and runtime for fixed hidden-known benchmark processes. `analysis/main_results.csv` combines both with `evaluation_track` labels.
+`analysis/controlled_recovery_results.csv` reports Edge F1, SHD, lag MAE, direction accuracy, stability, eligible/supported truth-edge counts, intervention precision/recall/F1, uncertainty width, and runtime for fixed hidden-known benchmark processes. Intervention recall excludes truth relations that have no legal simulator manipulation route. `analysis/main_results.csv` combines both with `evaluation_track` labels.
 
 ## Method contracts
 
@@ -37,6 +37,11 @@ The selected semantic representation and structured prospective criteria are fro
 - The `without_joint_trajectories` ablation uses the single-trajectory method.
 - The `without_structured_representation` ablation uses the same generated observables with unrestricted candidates and the full bootstrap contract.
 - All graph methods receive matched intervention evaluation; empty graphs produce missing metrics plus a reason.
+- Direct Micro->Meso and upstream-mediated Meso->Macro classifications use the same matched-seed parameter intervention; generated observables are never manipulated.
+- Full Discovery method rows use their actual candidate denominators, including 756 unrestricted ordered pairs for 28 nodes.
+- The primary attribution object contains Full Method intervention evidence only; comparative methods have a separate CSV.
+- Controlled Recovery uses four branch-local BH-FDR families and rule-consistent direct parameter observables.
+- Prospective absence, wrong direction, order failure, or missing required observational edges is classified as contradiction after successful source manipulation.
 
 ## Runtime, provenance, and rendering
 

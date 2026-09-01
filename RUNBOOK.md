@@ -88,6 +88,22 @@ runs\rerun_001\logs\progress.jsonl
   --plot-repo "..\llm-agentic-dis"
 ```
 
+Semantic resume 是 generation-level：若某个
+`llm\<scenario>\generation_*\generation_result.json` 已接受，程序会先校验
+prompt/request/response/accepted payload/result 的哈希，然后跳过该 generation。
+缺失 sidecar、哈希不一致或当前 prompt contract 不一致都会 fail closed；已有
+request/response 不会被静默覆盖。
+
+## Stage 3 与指标口径
+
+- Micro->Meso 使用 direct Micro manipulation root，范围标记为 `direct_root`。
+- Meso->Macro 沿同一候选/保留路径寻找上游 Micro root，仅修改其真实 simulator parameter，范围标记为 `upstream_mediated`。
+- `directionally_contradicted` 是唯一的方向矛盾名称。
+- Full Discovery 的 contradiction rate 分母为除 `not_applicable` 外的全部适用尝试；`manipulation_failure` 保留在分母中。
+- Controlled intervention recall 的分母仅包含具有合法 manipulation route 的 truth edges；其余 truth edges 为 `not_applicable`，不是 false negative。
+- unrestricted temporal qualification 使用实际 `N*(N-1)` candidate space；28 个节点时分母为 756。
+- Figure 7 只接受 Micro/Meso/Macro 均显著、onset 有序且两条 Full Method intervention edge 均为 `supported` 的路径。
+
 程序会核对 source/config/API-public-config/stage artifact hashes。已经验证成功的 task 或 stage 会跳过；hash 不一致会 fail closed，并要求新 run-id。不要手工修改 run 内 CSV、JSON、Parquet、NPZ 或图数据。
 
 ## 第五步：正式数据保存位置
@@ -149,6 +165,7 @@ runs\rerun_001\
 - `analysis\paired_effects.parquet`
 - `analysis\effect_curves.parquet`
 - `analysis\intervention_classifications.csv`
+- `analysis\comparative_method_intervention_evidence.csv`
 - `analysis\path_timing_summary.csv`
 - `analysis\observation_robustness.csv`
 - `analysis\causal_scalability.csv`

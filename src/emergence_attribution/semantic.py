@@ -52,6 +52,109 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_immutable_text(path: Path, content: str) -> None:
+    """Create an LLM history artifact once, or verify identical existing bytes."""
+
+    if path.exists():
+        if path.read_text(encoding="utf-8") != content:
+            raise RuntimeError(f"refusing to overwrite completed LLM history: {path}")
+        return
+    path.write_text(content, encoding="utf-8")
+
+
+def _write_generation_checkpoint(
+    generation_root: Path,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    artifacts = {
+        path.name: _sha256_path(path)
+        for path in sorted(generation_root.glob("*"))
+        if path.is_file()
+        and (
+            path.name == "prompt.md"
+            or path.name.startswith("request_round_")
+            or path.name.startswith("response_round_")
+        )
+    }
+    completed = {
+        **payload,
+        "checkpoint": {
+            "schema_version": "1.0",
+            "payload_sha256": sha256_json(payload),
+            "artifact_sha256": artifacts,
+            "accepted_generation_sha256": sha256_json(payload["accepted_generation"])
+            if payload.get("accepted_generation") is not None
+            else None,
+        },
+    }
+    result_path = generation_root / "generation_result.json"
+    result_text = json.dumps(completed, indent=2, ensure_ascii=False)
+    _write_immutable_text(result_path, result_text)
+    _write_immutable_text(
+        generation_root / "generation_result.sha256",
+        _sha256_path(result_path) + "\n",
+    )
+    return completed
+
+
+def _load_verified_generation_checkpoint(
+    generation_root: Path,
+    scenario: str,
+    generation_index: int,
+    expected_prompt: str,
+    scenario_spec: dict[str, Any],
+    representation_config: dict[str, Any],
+) -> dict[str, Any] | None:
+    result_path = generation_root / "generation_result.json"
+    checksum_path = generation_root / "generation_result.sha256"
+    if not result_path.exists() and not checksum_path.exists():
+        return None
+    if not result_path.is_file() or not checksum_path.is_file():
+        raise RuntimeError(f"incomplete generation checkpoint: {generation_root}")
+    expected_result_hash = checksum_path.read_text(encoding="utf-8").strip()
+    if _sha256_path(result_path) != expected_result_hash:
+        raise RuntimeError(f"generation result hash mismatch: {generation_root}")
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    checkpoint = payload.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError(f"generation checkpoint metadata missing: {generation_root}")
+    unhashed = {key: value for key, value in payload.items() if key != "checkpoint"}
+    if checkpoint.get("payload_sha256") != sha256_json(unhashed):
+        raise RuntimeError(f"generation checkpoint payload hash mismatch: {generation_root}")
+    if payload.get("scenario") != scenario or int(payload.get("generation", -1)) != generation_index:
+        raise RuntimeError(f"generation checkpoint identity mismatch: {generation_root}")
+    for name, expected_hash in checkpoint.get("artifact_sha256", {}).items():
+        artifact = generation_root / name
+        if not artifact.is_file() or _sha256_path(artifact) != expected_hash:
+            raise RuntimeError(f"generation artifact hash mismatch: {artifact}")
+    prompt_path = generation_root / "prompt.md"
+    if not prompt_path.is_file() or prompt_path.read_text(encoding="utf-8") != expected_prompt:
+        raise RuntimeError(f"generation prompt does not match current contract: {generation_root}")
+    accepted = payload.get("accepted_generation")
+    if payload.get("status") == "accepted":
+        if checkpoint.get("accepted_generation_sha256") != sha256_json(accepted):
+            raise RuntimeError(f"accepted generation hash mismatch: {generation_root}")
+        value = SemanticGeneration.model_validate(accepted)
+        validation = validate_generation(
+            value, scenario, scenario_spec, representation_config
+        )
+        if not validation["valid"]:
+            raise RuntimeError(
+                f"accepted generation no longer validates: {generation_root}: "
+                f"{validation['errors']}"
+            )
+    payload["resumed_from_verified_checkpoint"] = True
+    return payload
+
+
 def build_prompt(
     scenario: str,
     scenario_spec: dict[str, Any],
@@ -320,9 +423,18 @@ def run_generation(
     system, user = build_prompt(scenario, scenario_spec, rep_config, prompt_template)
     generation_root = output_root / scenario / f"generation_{generation_index:02d}"
     generation_root.mkdir(parents=True, exist_ok=True)
-    (generation_root / "prompt.md").write_text(
-        f"# System\n\n{system}\n\n# User\n\n{user}\n", encoding="utf-8"
+    prompt_content = f"# System\n\n{system}\n\n# User\n\n{user}\n"
+    _write_immutable_text(generation_root / "prompt.md", prompt_content)
+    checkpoint = _load_verified_generation_checkpoint(
+        generation_root,
+        scenario,
+        generation_index,
+        prompt_content,
+        scenario_spec,
+        rep_config,
     )
+    if checkpoint is not None:
+        return checkpoint
     if completion is None:
         client = OpenAICompatibleClient(llm_config)
         completion = client.complete_json
@@ -342,12 +454,29 @@ def run_generation(
                 + prior_text
             )
         request = user + repair
-        (generation_root / f"request_round_{repair_round:02d}.md").write_text(
-            f"# System\n\n{system}\n\n# User\n\n{request}\n", encoding="utf-8"
+        request_path = generation_root / f"request_round_{repair_round:02d}.md"
+        _write_immutable_text(
+            request_path,
+            f"# System\n\n{system}\n\n# User\n\n{request}\n",
         )
         call_started = time.perf_counter()
+        response_path = generation_root / f"response_round_{repair_round:02d}.json"
+        existing_response = (
+            json.loads(response_path.read_text(encoding="utf-8"))
+            if response_path.is_file()
+            else None
+        )
         try:
-            response = completion(system, request)
+            if existing_response is None:
+                response = completion(system, request)
+            else:
+                previous_call = existing_response["call"]
+                response = LLMResponse(
+                    text=str(existing_response["raw_text"]),
+                    input_tokens=int(previous_call["input_tokens"]),
+                    output_tokens=int(previous_call["output_tokens"]),
+                    model=str(previous_call["model"]),
+                )
             prior_text = response.text
             parsed = _parse_json(response.text)
             value = SemanticGeneration.model_validate(parsed)
@@ -362,25 +491,33 @@ def run_generation(
             validation = {"valid": False, "errors": [f"{type(exc).__name__}: {exc}"]}
             errors = list(validation["errors"])
             status = "schema_rejected"
-            response = locals().get("response", LLMResponse("", 0, 0, str(llm_config["model"])))
-        call = {
-            "repair_round": repair_round,
-            "status": status,
-            "duration_seconds": time.perf_counter() - call_started,
-            "input_tokens": response.input_tokens,
-            "output_tokens": response.output_tokens,
-            "model": response.model,
-            "validation": validation,
-        }
+            if existing_response is None:
+                response = LLMResponse("", 0, 0, str(llm_config["model"]))
+        call = (
+            existing_response["call"]
+            if existing_response is not None
+            else {
+                "repair_round": repair_round,
+                "status": status,
+                "duration_seconds": time.perf_counter() - call_started,
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "model": response.model,
+                "validation": validation,
+            }
+        )
+        if call["status"] != status:
+            raise RuntimeError(f"stored response validation status changed: {response_path}")
         calls.append(call)
-        (generation_root / f"response_round_{repair_round:02d}.json").write_text(
-            json.dumps(
+        if existing_response is None:
+            _write_immutable_text(
+                response_path,
+                json.dumps(
                 {"raw_text": response.text, "parsed_json": parsed, "call": call},
                 indent=2,
                 ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+                ),
+            )
         if accepted is not None:
             break
     payload = {
@@ -393,10 +530,7 @@ def run_generation(
         "validation": accepted_validation,
         "calls": calls,
     }
-    (generation_root / "generation_result.json").write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    return payload
+    return _write_generation_checkpoint(generation_root, payload)
 
 
 def _jaccard(first: set[Any], second: set[Any]) -> float:

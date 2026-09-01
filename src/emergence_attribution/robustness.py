@@ -41,13 +41,16 @@ def _metric_row(
     supports = [edge.support for edge in graph if np.isfinite(edge.support)]
     lag_supports = [edge.lag_support for edge in graph if np.isfinite(edge.lag_support)]
     lag_stds = [edge.lag_std for edge in graph if np.isfinite(edge.lag_std)]
+    qualification_rate = len(graph) / max(candidates, 1)
+    if qualification_rate > 1.0 + 1e-12:
+        raise RuntimeError(f"temporal qualification rate exceeds one for {scenario}:{variant}")
     return {
         "evaluation_track": "full_discovery",
         "scenario": scenario,
         "variant": variant,
         "candidate_edge_count": candidates,
         "retained_edge_count": len(graph),
-        "temporal_qualification_rate": len(graph) / max(candidates, 1),
+        "temporal_qualification_rate": qualification_rate,
         "stability": float(np.mean(supports)) if supports else np.nan,
         "lag_support": float(np.mean(lag_supports)) if lag_supports else np.nan,
         "lag_std": float(np.mean(lag_stds)) if lag_stds else np.nan,
@@ -62,7 +65,10 @@ def _metric_row(
 def _support_rate(frame: pd.DataFrame) -> float:
     if frame.empty or "primary_class" not in frame.columns:
         return float("nan")
-    return float(np.mean(frame["primary_class"] == "supported"))
+    applicable = frame[frame["primary_class"] != "not_applicable"]
+    if applicable.empty:
+        return float("nan")
+    return float(np.mean(applicable["primary_class"] == "supported"))
 
 
 def run_functional_ablations(

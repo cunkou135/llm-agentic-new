@@ -17,6 +17,7 @@ import pandas as pd
 from .provenance import sha256_file
 from .temporal import load_graph_records
 from .controlled import controlled_representation
+from .interventions import eligible_propagation_path_ids
 
 
 COLOURS = {
@@ -295,6 +296,10 @@ def figure_6(run_root: Path, output_root: Path, formats: list[str], config: dict
 
 def figure_7(run_root: Path, output_root: Path, formats: list[str], config: dict[str, Any]) -> list[Path]:
     timing = pd.read_csv(run_root / "analysis" / "path_timing_summary.csv")
+    classifications = pd.read_csv(
+        run_root / "analysis" / "intervention_classifications.csv"
+    )
+    eligible_ids = eligible_propagation_path_ids(timing, classifications)
     scenarios = list(config.get("scenario_order", sorted(timing["scenario"].unique())))
     figure, axes = plt.subplots(
         max(len(scenarios), 1), 1, figsize=(7.2, 4.6), squeeze=False,
@@ -302,7 +307,10 @@ def figure_7(run_root: Path, output_root: Path, formats: list[str], config: dict
     )
     for index, scenario in enumerate(scenarios):
         ax = axes[index, 0]
-        subset = timing[timing["scenario"] == scenario].copy()
+        subset = timing[
+            (timing["scenario"] == scenario)
+            & (timing["path_id"].astype(str).isin(eligible_ids))
+        ].copy()
         macro = subset[subset["scale"] == "macro"].copy()
         macro["magnitude"] = macro["cumulative_effect"].abs()
         selected = macro.sort_values(
@@ -326,7 +334,7 @@ def figure_7(run_root: Path, output_root: Path, formats: list[str], config: dict
             first = subset[subset["path_id"] == path_id].iloc[0]
             labels.append(f"P{row_number:02d}  {first['parameter']}:{first['direction']}")
         ax.set_yticks(np.arange(len(matrix)), labels, fontsize=5.4)
-        ax.set_title(f"{scenario.title()} — strongest complete paths")
+        ax.set_title(f"{scenario.title()} — strongest validated propagation paths")
         figure.colorbar(
             image, ax=ax, fraction=0.025, pad=0.02,
             label="Mean standardised cumulative effect",

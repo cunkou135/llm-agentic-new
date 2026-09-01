@@ -39,7 +39,7 @@ def controlled_representation(scenario: str) -> dict[str, Any]:
         {
             "s_micro_satisfaction": "tolerance",
             "s_micro_relocation": "move_probability",
-            "s_micro_similarity": "destination_preference",
+            "s_micro_destination_similarity": "destination_preference",
         }
         if scenario == "schelling"
         else {
@@ -52,7 +52,7 @@ def controlled_representation(scenario: str) -> dict[str, Any]:
         {
             "id": item.process_id,
             "scale": item.scale,
-            "branch_id": f"controlled_{index % 4}",
+            "branch_id": f"controlled_branch_{index % 4}",
             "computation": item.computation,
             "temporal_aggregation": item.temporal_aggregation,
             "parameter_associations": (
@@ -68,30 +68,34 @@ def controlled_representation(scenario: str) -> dict[str, Any]:
         }
         for index, item in enumerate(processes)
     ]
+    branch_lookup = {item["id"]: item["branch_id"] for item in indicators}
     truth = reference_relations(scenario)
     edges = [
         {
             "source": item.source,
             "target": item.target,
-            "branch_id": "controlled",
+            "branch_id": branch_lookup[item.source],
             "expected_direction": "increase" if item.sign > 0 else "decrease",
         }
         for item in truth
     ]
     prefix = "s" if scenario == "schelling" else "d"
+    micro_ids = [
+        item["id"] for item in indicators if item["scale"] == "micro"
+    ]
     for index in range(4):
         edges.extend(
             [
                 {
-                    "source": f"{prefix}_micro_{('satisfaction', 'relocation', 'boundary', 'similarity')[index] if scenario == 'schelling' else ('assimilation', 'shift', 'repulsion', 'rejection')[index]}",
+                    "source": micro_ids[index],
                     "target": f"{prefix}_meso_{(index + 1) % 4}",
-                    "branch_id": "controlled",
+                    "branch_id": branch_lookup[micro_ids[index]],
                     "expected_direction": "unknown",
                 },
                 {
                     "source": f"{prefix}_meso_{index}",
                     "target": f"{prefix}_macro_{(index + 1) % 4}",
-                    "branch_id": "controlled",
+                    "branch_id": branch_lookup[f"{prefix}_meso_{index}"],
                     "expected_direction": "unknown",
                 },
             ]
@@ -100,6 +104,38 @@ def controlled_representation(scenario: str) -> dict[str, Any]:
         "scenario": scenario,
         "indicators": indicators,
         "candidate_edges": edges,
+    }
+
+
+def controlled_intervention_recovery_metrics(
+    truth_edges: set[tuple[str, str]],
+    eligible_truth_edges: set[tuple[str, str]],
+    supported_edges: set[tuple[str, str]],
+) -> dict[str, float]:
+    """Score recovery only against truth edges the simulator can manipulate."""
+
+    if not eligible_truth_edges.issubset(truth_edges):
+        raise ValueError("eligible intervention truth must be a subset of truth")
+    supported_truth = supported_edges & eligible_truth_edges
+    precision = (
+        len(supported_truth) / len(supported_edges) if supported_edges else 0.0
+    )
+    recall = (
+        len(supported_truth) / len(eligible_truth_edges)
+        if eligible_truth_edges
+        else np.nan
+    )
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if np.isfinite(recall) and precision + recall
+        else 0.0 if np.isfinite(recall) else np.nan
+    )
+    return {
+        "eligible_truth_edge_count": float(len(eligible_truth_edges)),
+        "supported_truth_edge_count": float(len(supported_truth)),
+        "intervention_precision": float(precision),
+        "intervention_recall": float(recall),
+        "intervention_f1": float(f1),
     }
 
 
@@ -256,7 +292,13 @@ def run_controlled_intervention_stage(
 ) -> dict[str, Any]:
     """Apply Stage 3 to the fixed benchmark and update only its result table."""
 
-    from .interventions import classify_edge_interventions, estimate_all_effects
+    from .interventions import (
+        CLASSIFICATION_COLUMNS,
+        classify_edge_interventions,
+        estimate_all_effects,
+        intervention_testable_edges,
+        not_applicable_classification,
+    )
     from .temporal import load_graph_records
 
     representations = {
@@ -281,18 +323,10 @@ def run_controlled_intervention_stage(
             )
             if frame.empty:
                 frame = pd.DataFrame(
-                    [{
-                        "scenario": scenario,
-                        "source": "", "target": "", "parameter": "",
-                        "direction": "", "manipulation_success": False,
-                        "primary_class": "not_applicable",
-                        "underlying_class": "not_applicable",
-                        "intervention_scope": "none", "source_onset": -1,
-                        "target_onset": -1, "intervention_delay": np.nan,
-                        "observational_lag": np.nan, "lag_difference": np.nan,
-                        "source_effect": np.nan, "target_effect": np.nan,
-                        "not_applicable_reason": "no_temporally_retained_edges",
-                    }]
+                    [not_applicable_classification(
+                        scenario, reason="no_temporally_retained_edges"
+                    )],
+                    columns=CLASSIFICATION_COLUMNS,
                 )
             frame.insert(1, "method", method)
             classified_frames.append(frame)
@@ -307,6 +341,9 @@ def run_controlled_intervention_stage(
     results = pd.read_csv(results_path)
     for scenario in representations:
         truth = {(edge.source, edge.target) for edge in reference_relations(scenario)}
+        eligible_truth = intervention_testable_edges(
+            sorted(truth), representations[scenario]
+        )
         for method in methods:
             subset = classifications[
                 (classifications["scenario"] == scenario)
@@ -318,16 +355,16 @@ def run_controlled_intervention_stage(
                 if row.primary_class == "supported"
             }
             mask = (results["scenario"] == scenario) & (results["method"] == method)
-            if bool((subset["primary_class"] == "not_applicable").all()):
-                results.loc[mask, "intervention_f1"] = np.nan
-                results.loc[mask, "intervention_metric_reason"] = "no_temporally_retained_edges"
-            else:
-                tp = len(supported & truth)
-                precision = tp / len(supported) if supported else 0.0
-                recall = tp / len(truth) if truth else 0.0
-                f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-                results.loc[mask, "intervention_f1"] = f1
-                results.loc[mask, "intervention_metric_reason"] = ""
+            metrics = controlled_intervention_recovery_metrics(
+                truth, eligible_truth, supported
+            )
+            for name, value in metrics.items():
+                results.loc[mask, name] = value
+            results.loc[mask, "intervention_metric_reason"] = (
+                "eligible_truth_edges_only"
+                if eligible_truth
+                else "no_truth_edge_has_a_legal_manipulation_route"
+            )
             results.loc[mask, "mean_ci_width"] = float(
                 effects[effects["scenario"] == scenario]["ci_width"].mean()
             )

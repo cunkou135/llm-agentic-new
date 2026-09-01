@@ -9,8 +9,8 @@
 5. Compile public Full Discovery trajectories and isolated Controlled Recovery trajectories.
 6. Run unchanged level-based lagged OLS, branch-local FDR, and whole-trajectory bootstrap.
 7. Generate the 336 intervention/mechanism-disabled trajectories under matched seeds.
-8. Estimate raw and standardised paired effects, onset intervals, relation classifications, and path timing for every graph method.
-9. Validate the frozen prospective predictions without changing any threshold or candidate relation.
+8. Estimate raw and standardised paired effects, onset intervals, and path-aware relation classifications: direct-root Micro->Meso and upstream-mediated Meso->Macro, while modifying simulator parameters only.
+9. Validate every required frozen prospective response, direction, observational edge, and temporal order without changing any threshold or candidate relation.
 10. Run functional ablations, repeated-subsample data efficiency, observation/representation robustness, mechanism-disabled checks, and scaling.
 11. Export separate discovery/recovery tables and dynamic Figure 2--8 inputs.
 12. Render from frozen scientific settings, hash all outputs, and freeze the completed run.
@@ -28,7 +28,7 @@ Generated indicator identities are never aligned to hidden identities. Hidden tr
 
 ## Resume guarantees
 
-Each stage verifies its immutable owned outputs. Result files intentionally updated by the intervention stage are owned by that later checkpoint, avoiding false mutation alarms. Existing formal NPZ files require matching original sidecars. Any source/config/public-model-contract change invalidates resume and requires a fresh run identifier.
+Each stage verifies its immutable owned outputs. Result files intentionally updated by the intervention stage are owned by that later checkpoint, avoiding false mutation alarms. Existing formal NPZ files require matching original sidecars. Semantic generation checkpoints additionally verify prompt/request/response/result hashes and never overwrite completed history. Any source/config/public-model-contract change invalidates resume and requires a fresh run identifier.
 
 ## Formal configuration
 

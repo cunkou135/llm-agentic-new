@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from .reference_truth import reference_processes, reference_relations
-from .temporal import TemporalEdge, load_graph_records
+from .temporal import TemporalEdge, load_graph_records, unrestricted_candidates
 
 
 GRAPH_METHODS = (
@@ -19,6 +19,56 @@ GRAPH_METHODS = (
     "trajectory_vote",
     "full_method",
 )
+
+
+def candidate_count_for_method(
+    method: str, representation: dict[str, Any]
+) -> int:
+    """Return the actual hypothesis space evaluated by a temporal method."""
+
+    if method == "unrestricted_temporal_search":
+        return len(unrestricted_candidates(representation))
+    return len(representation["candidate_edges"])
+
+
+def temporal_qualification_rate(retained_count: int, candidate_count: int) -> float:
+    rate = retained_count / max(candidate_count, 1)
+    if rate > 1.0 + 1e-12:
+        raise RuntimeError("temporal qualification rate exceeds one")
+    return float(rate)
+
+
+def intervention_classification_rates(
+    classifications: pd.DataFrame,
+) -> tuple[float, float, str]:
+    """Summarise attempted interventions under the paper's estimand.
+
+    ``not_applicable`` rows are outside the estimand.  Manipulation failures
+    remain in the denominator because they are attempted, applicable
+    intervention tests; only directional contradiction contributes to the
+    contradiction numerator.
+    """
+
+    if bool((classifications["primary_class"] == "contradicted").any()):
+        raise RuntimeError(
+            "legacy intervention class 'contradicted' is forbidden; "
+            "use 'directionally_contradicted'"
+        )
+    applicable = classifications[
+        classifications["primary_class"] != "not_applicable"
+    ]
+    if applicable.empty:
+        return np.nan, np.nan, "no_applicable_intervention_classifications"
+    return (
+        float(np.mean(applicable["primary_class"] == "supported")),
+        float(
+            np.mean(
+                applicable["primary_class"] == "directionally_contradicted"
+            )
+        ),
+        "applicable_attempts_excluding_not_applicable;"
+        "manipulation_failure_included_in_denominator",
+    )
 
 
 def _controlled_graph_metrics(
@@ -97,7 +147,8 @@ def evaluate_full_discovery(
         supports = [edge.support for edge in graph if np.isfinite(edge.support)]
         lag_supports = [edge.lag_support for edge in graph if np.isfinite(edge.lag_support)]
         lag_stds = [edge.lag_std for edge in graph if np.isfinite(edge.lag_std)]
-        candidate_count = len(representation["candidate_edges"])
+        candidate_count = candidate_count_for_method(method, representation)
+        qualification_rate = temporal_qualification_rate(len(graph), candidate_count)
         rows.append(
             {
                 "evaluation_track": "full_discovery",
@@ -106,7 +157,7 @@ def evaluate_full_discovery(
                 "indicator_count": len(representation["indicators"]),
                 "candidate_edge_count": candidate_count,
                 "retained_edge_count": len(graph),
-                "temporal_qualification_rate": len(graph) / max(candidate_count, 1),
+                "temporal_qualification_rate": qualification_rate,
                 "stability": float(np.mean(supports)) if supports else float("nan"),
                 "lag_support": float(np.mean(lag_supports)) if lag_supports else float("nan"),
                 "lag_std": float(np.mean(lag_stds)) if lag_stds else float("nan"),
@@ -153,6 +204,10 @@ def evaluate_controlled_recovery(run_root: Path) -> pd.DataFrame:
                 **metrics,
                 "runtime_seconds": runtime.get((scenario, method), float("nan")),
                 "intervention_f1": float("nan"),
+                "eligible_truth_edge_count": float("nan"),
+                "supported_truth_edge_count": float("nan"),
+                "intervention_precision": float("nan"),
+                "intervention_recall": float("nan"),
                 "intervention_metric_reason": "pending_intervention_stage",
                 "mean_ci_width": float("nan"),
             }
@@ -199,20 +254,19 @@ def update_intervention_metrics(
             mask = (full["scenario"] == scenario) & (full["method"] == method)
             if subset.empty:
                 continue
-            if bool((subset["primary_class"] == "not_applicable").all()):
+            support_rate, contradiction_rate, estimand = (
+                intervention_classification_rates(subset)
+            )
+            if not np.isfinite(support_rate):
                 full.loc[mask, "intervention_support_rate"] = np.nan
                 full.loc[mask, "contradiction_rate"] = np.nan
                 full.loc[mask, "intervention_metric_reason"] = (
                     "no_temporally_retained_edges"
                 )
                 continue
-            full.loc[mask, "intervention_support_rate"] = float(
-                np.mean(subset["primary_class"] == "supported")
-            )
-            full.loc[mask, "contradiction_rate"] = float(
-                np.mean(subset["primary_class"] == "contradicted")
-            )
-            full.loc[mask, "intervention_metric_reason"] = ""
+            full.loc[mask, "intervention_support_rate"] = support_rate
+            full.loc[mask, "contradiction_rate"] = contradiction_rate
+            full.loc[mask, "intervention_metric_reason"] = estimand
             full.loc[mask, "mean_ci_width"] = float(
                 effects[effects["scenario"] == scenario]["ci_width"].mean()
             )

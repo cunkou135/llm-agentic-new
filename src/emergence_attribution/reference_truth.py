@@ -59,7 +59,7 @@ _MICRO = {
         ("s_micro_satisfaction", _fraction("unhappy")),
         ("s_micro_relocation", _fraction("moved")),
         ("s_micro_boundary", _fraction("boundary_agent")),
-        ("s_micro_similarity", _mean("local_similarity")),
+        ("s_micro_destination_similarity", _mean("destination_similarity")),
     ],
     "deffuant": [
         ("d_micro_assimilation", _fraction("interaction_accepted")),

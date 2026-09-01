@@ -17,6 +17,66 @@ def _expected_sign(direction: str) -> int:
     return 1 if direction == "increase" else -1
 
 
+def classify_prediction_requirements(
+    source: Any | None,
+    downstream: list[Any | None],
+    expected_directions: list[str],
+    required_downstream: list[bool],
+    *,
+    source_required: bool,
+    order_required: bool,
+    observational_edges_retained: list[bool],
+) -> tuple[str, list[bool | None], bool, bool]:
+    """Apply the criteria frozen before baseline simulation.
+
+    Missing required responses, wrong directions, temporal-order violations,
+    and missing required observational edges are falsifications rather than
+    partial support.  ``partially_supported`` is reserved for optional
+    evidence and is therefore unreachable under the current all-required
+    formal semantic contract.
+    """
+
+    if source_required and (source is None or not bool(source.significant)):
+        return "manipulation_failure", [], False, False
+    items = [source, *downstream]
+    direction_matches: list[bool | None] = []
+    onsets: list[float] = []
+    for item, expected_direction in zip(items, expected_directions):
+        if item is None or not bool(item.significant):
+            direction_matches.append(None)
+            onsets.append(np.nan)
+        else:
+            direction_matches.append(
+                int(item.effect_sign) == _expected_sign(expected_direction)
+            )
+            onsets.append(float(item.onset_time))
+    downstream_supported = all(
+        (not required) or (item is not None and bool(item.significant))
+        for item, required in zip(downstream, required_downstream)
+    )
+    finite_order = bool(
+        len(onsets) > 0
+        and all(np.isfinite(value) and value >= 0 for value in onsets)
+        and np.all(np.diff(np.asarray(onsets, dtype=float)) >= 0)
+    )
+    if not downstream_supported:
+        return "contradicted", direction_matches, finite_order, False
+    if any(value is False for value in direction_matches):
+        return "contradicted", direction_matches, finite_order, True
+    if order_required and not finite_order:
+        return "contradicted", direction_matches, finite_order, True
+    if not all(observational_edges_retained):
+        return "contradicted", direction_matches, finite_order, True
+    required_direction_indices = [0] + [
+        index + 1 for index, required in enumerate(required_downstream) if required
+    ]
+    if all(direction_matches[index] is True for index in required_direction_indices):
+        return "supported", direction_matches, finite_order, True
+    if any(value is True for value in direction_matches):
+        return "partially_supported", direction_matches, finite_order, True
+    return "inconclusive", direction_matches, finite_order, True
+
+
 def validate_prospective_predictions(
     run_root: Path,
     representations: dict[str, dict[str, Any]],
@@ -39,7 +99,6 @@ def validate_prospective_predictions(
         }
         for prediction in scenario_predictions:
             criteria = prediction["validation_criteria"]
-            ordered = prediction["expected_temporal_order"]
             expected_edges = [
                 (item["source"], item["target"])
                 for item in criteria["required_candidate_edges"]
@@ -61,57 +120,17 @@ def validate_prospective_predictions(
             source_required = bool(criteria["required_source_response"])
             downstream_required = list(criteria["required_downstream_response"])
             order_required = bool(criteria["required_temporal_order"])
-            if source_required and (source is None or not bool(source.significant)):
-                classification = "manipulation_failure"
-                direction_matches: list[bool | None] = []
-                onset_order_supported = False
-            else:
-                direction_matches = []
-                significant_count = 0
-                onsets = []
-                for indicator, expected_direction in zip(indicators, expected_directions):
-                    item = lookup.get(indicator)
-                    if item is None or not bool(item.significant):
-                        direction_matches.append(None)
-                        onsets.append(np.nan)
-                    else:
-                        significant_count += 1
-                        direction_matches.append(
-                            int(item.effect_sign) == _expected_sign(expected_direction)
-                        )
-                        onsets.append(float(item.onset_time))
-                finite_onsets = [value for value in onsets if np.isfinite(value) and value >= 0]
-                onset_order_supported = bool(
-                    len(finite_onsets) == len(onsets)
-                    and np.all(np.diff(np.asarray(onsets)) >= 0)
+            classification, direction_matches, onset_order_supported, downstream_supported = (
+                classify_prediction_requirements(
+                    source,
+                    [lookup.get(indicator) for indicator in prediction["downstream_indicators"]],
+                    expected_directions,
+                    downstream_required,
+                    source_required=source_required,
+                    order_required=order_required,
+                    observational_edges_retained=observational_edges_retained,
                 )
-                downstream_responses_supported = all(
-                    (not required)
-                    or (
-                        lookup.get(indicator) is not None
-                        and bool(lookup[indicator].significant)
-                    )
-                    for indicator, required in zip(
-                        prediction["downstream_indicators"], downstream_required
-                    )
-                )
-                if any(value is False for value in direction_matches) or (
-                    significant_count == len(indicators)
-                    and order_required
-                    and not onset_order_supported
-                ):
-                    classification = "contradicted"
-                elif (
-                    all(value is True for value in direction_matches)
-                    and downstream_responses_supported
-                    and (onset_order_supported or not order_required)
-                    and all(observational_edges_retained)
-                ):
-                    classification = "supported"
-                elif significant_count > 1 or any(observational_edges_retained):
-                    classification = "partially_supported"
-                else:
-                    classification = "inconclusive"
+            )
             rows.append(
                 {
                     "scenario": scenario,
@@ -129,6 +148,7 @@ def validate_prospective_predictions(
                     ),
                     "direction_matches": json.dumps(direction_matches),
                     "onset_order_supported": onset_order_supported,
+                    "required_downstream_responses_supported": downstream_supported,
                     "falsification_condition": prediction["falsification_condition"],
                     "prediction_sha256": hashlib.sha256(
                         json.dumps(

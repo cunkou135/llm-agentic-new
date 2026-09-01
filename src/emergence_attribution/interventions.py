@@ -42,12 +42,23 @@ class EffectSummary:
 
 
 CLASSIFICATION_COLUMNS = [
-    "scenario", "source", "target", "parameter", "direction",
+    "scenario", "root_source", "edge_source", "edge_target",
+    "source", "target", "parameter", "direction", "manipulation_level",
     "manipulation_success", "primary_class", "underlying_class",
-    "intervention_scope", "source_onset", "target_onset",
+    "intervention_scope", "root_onset", "source_onset", "target_onset",
     "intervention_delay", "observational_lag", "lag_difference",
-    "source_effect", "target_effect", "not_applicable_reason",
+    "root_effect", "source_effect", "target_effect", "not_applicable_reason",
 ]
+
+
+INTERVENTION_CLASSES = {
+    "supported",
+    "directionally_contradicted",
+    "no_stable_downstream_effect",
+    "manipulation_failure",
+    "inconclusive",
+    "not_applicable",
+}
 
 
 def detect_onset(
@@ -323,6 +334,109 @@ def direct_parameter_sources(representation: dict[str, Any]) -> dict[str, list[s
     return {key: sorted(set(value)) for key, value in result.items()}
 
 
+def upstream_manipulation_routes(
+    edge_source: str,
+    edge_target: str,
+    graph: Sequence[TemporalEdge],
+    representation: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Resolve legal simulator-parameter roots for one adjacent-scale edge.
+
+    Parameters are never attached to or used to overwrite a generated
+    observable.  A Micro->Meso edge is tested at its direct Micro root.  A
+    Meso->Macro edge reuses a parameter attached to an upstream Micro parent
+    and is therefore explicitly upstream-mediated.
+    """
+
+    scales = {item["id"]: item["scale"] for item in representation["indicators"]}
+    branches = {
+        item["id"]: item["branch_id"] for item in representation["indicators"]
+    }
+    direct = direct_parameter_sources(representation)
+    root_parameters: dict[str, list[str]] = {}
+    for parameter, roots in direct.items():
+        for root in roots:
+            root_parameters.setdefault(root, []).append(parameter)
+    source_scale, target_scale = scales.get(edge_source), scales.get(edge_target)
+    if (source_scale, target_scale) == ("micro", "meso"):
+        roots = [edge_source]
+        scope = "direct_root"
+    elif (source_scale, target_scale) == ("meso", "macro"):
+        candidate_pairs = {
+            (edge["source"], edge["target"])
+            for edge in representation.get("candidate_edges", [])
+        }
+        retained_pairs = {(edge.source, edge.target) for edge in graph}
+        roots = sorted(
+            source
+            for source, target in candidate_pairs | retained_pairs
+            if target == edge_source
+            and scales.get(source) == "micro"
+            and branches.get(source) == branches.get(edge_source)
+        )
+        scope = "upstream_mediated"
+    else:
+        return []
+    return [
+        {
+            "root_source": root,
+            "parameter": parameter,
+            "intervention_scope": scope,
+            "manipulation_level": "micro",
+        }
+        for root in sorted(set(roots))
+        for parameter in sorted(set(root_parameters.get(root, [])))
+    ]
+
+
+def intervention_testable_edges(
+    edges: Sequence[tuple[str, str]],
+    representation: dict[str, Any],
+) -> set[tuple[str, str]]:
+    """Return truth/candidate relations with a legal simulator manipulation route."""
+
+    return {
+        (source, target)
+        for source, target in edges
+        if upstream_manipulation_routes(source, target, (), representation)
+    }
+
+
+def not_applicable_classification(
+    scenario: str,
+    *,
+    source: str = "",
+    target: str = "",
+    observational_lag: float = np.nan,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "scenario": scenario,
+        "root_source": "",
+        "edge_source": source,
+        "edge_target": target,
+        "source": source,
+        "target": target,
+        "parameter": "",
+        "direction": "",
+        "manipulation_level": "none",
+        "manipulation_success": False,
+        "primary_class": "not_applicable",
+        "underlying_class": "not_applicable",
+        "intervention_scope": "none",
+        "root_onset": -1,
+        "source_onset": -1,
+        "target_onset": -1,
+        "intervention_delay": np.nan,
+        "observational_lag": observational_lag,
+        "lag_difference": np.nan,
+        "root_effect": np.nan,
+        "source_effect": np.nan,
+        "target_effect": np.nan,
+        "not_applicable_reason": reason,
+    }
+
+
 def classify_edge_interventions(
     scenario: str,
     graph: Sequence[TemporalEdge],
@@ -336,50 +450,40 @@ def classify_edge_interventions(
         (row.parameter, row.direction, row.node_id): row
         for row in effects[effects["scenario"] == scenario].itertuples()
     }
-    direct = direct_parameter_sources(representation)
-    sources_to_parameters: dict[str, list[str]] = {}
-    for parameter, nodes in direct.items():
-        for node in nodes:
-            sources_to_parameters.setdefault(node, []).append(parameter)
     rows: list[dict[str, Any]] = []
     for edge in graph:
-        parameters = sorted(sources_to_parameters.get(edge.source, []))
-        if not parameters:
+        routes = upstream_manipulation_routes(
+            edge.source, edge.target, graph, representation
+        )
+        if not routes:
             rows.append(
-                {
-                    "scenario": scenario,
-                    "source": edge.source,
-                    "target": edge.target,
-                    "parameter": "",
-                    "direction": "",
-                    "manipulation_success": False,
-                    "primary_class": "inconclusive",
-                    "underlying_class": "inconclusive",
-                    "intervention_scope": "unmapped",
-                    "source_onset": -1,
-                    "target_onset": -1,
-                    "intervention_delay": np.nan,
-                    "observational_lag": edge.lag,
-                    "lag_difference": np.nan,
-                    "source_effect": np.nan,
-                    "target_effect": np.nan,
-                    "not_applicable_reason": "",
-                }
+                not_applicable_classification(
+                    scenario,
+                    source=edge.source,
+                    target=edge.target,
+                    observational_lag=edge.lag,
+                    reason="no_legal_upstream_micro_manipulation_root",
+                )
             )
             continue
-        for parameter in parameters:
-            scope = "non_local" if len(direct.get(parameter, [])) > 1 else "local"
+        for route in routes:
+            parameter = route["parameter"]
+            root_source = route["root_source"]
             for direction in ("minus", "plus"):
+                root = effect_lookup.get((parameter, direction, root_source))
                 source = effect_lookup.get((parameter, direction, edge.source))
                 target = effect_lookup.get((parameter, direction, edge.target))
-                if source is None or target is None:
+                if root is None or source is None or target is None:
                     evidence = "inconclusive"
                     success = False
-                    source_onset = target_onset = -1
-                    source_effect = target_effect = delay = lag_difference = np.nan
+                    root_onset = source_onset = target_onset = -1
+                    root_effect = source_effect = target_effect = np.nan
+                    delay = lag_difference = np.nan
                 else:
-                    success = bool(source.significant)
+                    success = bool(root.significant)
+                    root_onset = int(root.onset_time)
                     source_onset, target_onset = int(source.onset_time), int(target.onset_time)
+                    root_effect = float(root.cumulative_effect_standardised)
                     source_effect = float(source.cumulative_effect_standardised)
                     target_effect = float(target.cumulative_effect_standardised)
                     delay = (
@@ -390,15 +494,22 @@ def classify_edge_interventions(
                     lag_difference = delay - edge.lag if np.isfinite(delay) else np.nan
                     expected_target_sign = int(np.sign(source_effect * edge.beta))
                     observed_target_sign = int(np.sign(target_effect))
+                    propagation_order_ok = bool(
+                        root_onset >= 0
+                        and source_onset >= root_onset
+                        and target_onset >= source_onset
+                    )
                     timing_ok = bool(
-                        np.isfinite(delay)
-                        and delay >= 0
+                        propagation_order_ok
+                        and np.isfinite(delay)
                         and abs(lag_difference) <= lag_tolerance
                     )
-                    if not source.significant:
+                    if not root.significant:
                         evidence = "manipulation_failure"
-                    elif not target.significant:
+                    elif not source.significant or not target.significant:
                         evidence = "no_stable_downstream_effect"
+                    elif expected_target_sign == 0:
+                        evidence = "inconclusive"
                     elif observed_target_sign != expected_target_sign:
                         evidence = "directionally_contradicted"
                     elif timing_ok:
@@ -408,25 +519,35 @@ def classify_edge_interventions(
                 rows.append(
                     {
                         "scenario": scenario,
+                        "root_source": root_source,
+                        "edge_source": edge.source,
+                        "edge_target": edge.target,
                         "source": edge.source,
                         "target": edge.target,
                         "parameter": parameter,
                         "direction": direction,
+                        "manipulation_level": route["manipulation_level"],
                         "manipulation_success": success,
                         "primary_class": evidence,
                         "underlying_class": evidence,
-                        "intervention_scope": scope,
+                        "intervention_scope": route["intervention_scope"],
+                        "root_onset": root_onset,
                         "source_onset": source_onset,
                         "target_onset": target_onset,
                         "intervention_delay": delay,
                         "observational_lag": edge.lag,
                         "lag_difference": lag_difference,
+                        "root_effect": root_effect,
                         "source_effect": source_effect,
                         "target_effect": target_effect,
                         "not_applicable_reason": "",
                     }
                 )
-    return pd.DataFrame(rows, columns=CLASSIFICATION_COLUMNS)
+    frame = pd.DataFrame(rows, columns=CLASSIFICATION_COLUMNS)
+    unknown = sorted(set(frame["primary_class"]) - INTERVENTION_CLASSES)
+    if unknown:
+        raise RuntimeError(f"unknown intervention classification values: {unknown}")
+    return frame
 
 
 def graph_paths(
@@ -519,26 +640,78 @@ def path_timing_summary(
     return pd.DataFrame(rows)
 
 
-def select_representative_paths(path_summary: pd.DataFrame) -> dict[str, Any]:
+def eligible_propagation_path_ids(
+    path_summary: pd.DataFrame,
+    classifications: pd.DataFrame | None = None,
+    *,
+    allowed_classes: tuple[str, ...] = ("supported",),
+) -> set[str]:
+    """Select complete, significant, ordered, intervention-supported paths."""
+
+    supported: set[tuple[str, str, str, str, str]] | None = None
+    if classifications is not None:
+        required = {"scenario", "parameter", "direction", "source", "target", "primary_class"}
+        if not required.issubset(classifications.columns):
+            raise ValueError("intervention classifications lack propagation-filter columns")
+        evidence = classifications
+        if "method" in evidence.columns:
+            evidence = evidence[evidence["method"] == "full_method"]
+        evidence = evidence[evidence["primary_class"].isin(allowed_classes)]
+        supported = {
+            (str(row.scenario), str(row.parameter), str(row.direction), str(row.source), str(row.target))
+            for row in evidence.itertuples()
+        }
+    valid_ids: set[str] = set()
+    for path_id, group in path_summary.groupby("path_id"):
+        order = group.sort_values(
+            "scale", key=lambda values: values.map({"micro": 0, "meso": 1, "macro": 2})
+        )
+        onsets = order["onset_time"].to_numpy(dtype=float)
+        if not (
+            len(order) == 3
+            and order["scale"].tolist() == ["micro", "meso", "macro"]
+            and bool(order["significant"].all())
+            and np.all(onsets >= 0)
+            and np.all(np.diff(onsets) >= 0)
+        ):
+            continue
+        if supported is not None:
+            first = order.iloc[0]
+            keys = {
+                (
+                    str(first["scenario"]), str(first["parameter"]), str(first["direction"]),
+                    str(first["source"]), str(first["meso"]),
+                ),
+                (
+                    str(first["scenario"]), str(first["parameter"]), str(first["direction"]),
+                    str(first["meso"]), str(first["macro"]),
+                ),
+            }
+            if not keys.issubset(supported):
+                continue
+        valid_ids.add(str(path_id))
+    return valid_ids
+
+
+def select_representative_paths(
+    path_summary: pd.DataFrame,
+    classifications: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     selected: dict[str, Any] = {
-        "selection_rule": "closest_to_median_absolute_macro_cumulative_effect_among_complete_ordered_paths",
+        "selection_rule": "closest_to_median_absolute_macro_cumulative_effect_among_complete_ordered_full_method_intervention_supported_paths",
         "scenarios": {},
     }
+    valid_ids = eligible_propagation_path_ids(path_summary, classifications)
     for scenario, scenario_frame in path_summary.groupby("scenario"):
-        valid_ids = []
-        for path_id, group in scenario_frame.groupby("path_id"):
-            order = group.sort_values(
-                "scale", key=lambda values: values.map({"micro": 0, "meso": 1, "macro": 2})
-            )
-            onsets = order["onset_time"].to_numpy(dtype=float)
-            if len(order) == 3 and order["significant"].all() and np.all(onsets >= 0) and np.all(np.diff(onsets) >= 0):
-                valid_ids.append(path_id)
         macro = scenario_frame[
             (scenario_frame["scale"] == "macro")
-            & (scenario_frame["path_id"].isin(valid_ids))
+            & (scenario_frame["path_id"].astype(str).isin(valid_ids))
         ].copy()
         if macro.empty:
-            selected["scenarios"][scenario] = {"path_id": None, "reason": "no complete ordered path"}
+            selected["scenarios"][scenario] = {
+                "path_id": None,
+                "reason": "no complete ordered full-method intervention-supported path",
+            }
             continue
         macro["absolute_effect"] = macro["cumulative_effect"].abs()
         median = float(macro["absolute_effect"].median())
@@ -587,18 +760,10 @@ def run_intervention_stage(
                 )
             if classified.empty:
                 classified = pd.DataFrame(
-                    [{
-                        "scenario": scenario,
-                        "source": "", "target": "", "parameter": "",
-                        "direction": "", "manipulation_success": False,
-                        "primary_class": "not_applicable",
-                        "underlying_class": "not_applicable",
-                        "intervention_scope": "none", "source_onset": -1,
-                        "target_onset": -1, "intervention_delay": np.nan,
-                        "observational_lag": np.nan, "lag_difference": np.nan,
-                        "source_effect": np.nan, "target_effect": np.nan,
-                        "not_applicable_reason": "no_temporally_retained_edges",
-                    }]
+                    [not_applicable_classification(
+                        scenario, reason="no_temporally_retained_edges"
+                    )],
+                    columns=CLASSIFICATION_COLUMNS,
                 )
             classified.insert(1, "method", method)
             classifications.append(classified)
@@ -615,7 +780,9 @@ def run_intervention_stage(
         analysis_root / "intervention_classifications.csv", index=False
     )
     timing_frame.to_csv(analysis_root / "path_timing_summary.csv", index=False)
-    selection = select_representative_paths(timing_frame) if not timing_frame.empty else {
+    selection = select_representative_paths(
+        timing_frame, classification_frame
+    ) if not timing_frame.empty else {
         "selection_rule": "no_path_available",
         "scenarios": {},
     }

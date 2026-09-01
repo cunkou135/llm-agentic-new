@@ -27,6 +27,7 @@ CORE_ANALYSIS_FILES = [
     "path_timing_summary.csv",
     "representative_path_selection.json",
     "intervention_classifications.csv",
+    "comparative_method_intervention_evidence.csv",
     "observation_robustness.csv",
     "causal_scalability.csv",
     "prospective_validation.csv",
@@ -40,6 +41,18 @@ def integrate_evidence(
     classifications = pd.read_csv(
         run_root / "analysis" / "intervention_classifications.csv"
     )
+    if "method" not in classifications.columns:
+        raise RuntimeError("intervention classifications do not identify their method")
+    primary_classifications = classifications[
+        classifications["method"] == "full_method"
+    ].copy()
+    comparative = classifications[
+        classifications["method"] != "full_method"
+    ].copy()
+    comparative.to_csv(
+        run_root / "analysis" / "comparative_method_intervention_evidence.csv",
+        index=False,
+    )
     result: dict[str, Any] = {
         "schema_version": "1.0",
         "interpretation": "semantic hypotheses, temporal evidence, and intervention evidence remain distinct",
@@ -48,7 +61,9 @@ def integrate_evidence(
     for scenario, representation in sorted(representations.items()):
         graph = graphs[(scenario, "full_method")]
         intervention_lookup: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for row in classifications[classifications["scenario"] == scenario].to_dict(
+        for row in primary_classifications[
+            primary_classifications["scenario"] == scenario
+        ].to_dict(
             orient="records"
         ):
             intervention_lookup.setdefault((row["source"], row["target"]), []).append(row)
