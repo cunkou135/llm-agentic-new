@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import copy
+import hashlib
 import time
+from concurrent.futures import Executor, ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -13,10 +15,12 @@ import numpy as np
 import pandas as pd
 
 from .interventions import (
+    aggregate_edge_intervention_evidence,
     classify_edge_interventions,
     estimate_all_effects,
 )
 from .predefined import predefined_representation
+from .reference_truth import mechanism_target_for_variant, reference_relations
 from .simulation import compile_indicator_dataset, trajectories
 from .temporal import (
     TemporalEdge,
@@ -36,8 +40,14 @@ def _metric_row(
     variant: str,
     graph: Sequence[TemporalEdge],
     representation: dict[str, Any],
+    *,
+    candidate_count_override: int | None = None,
 ) -> dict[str, Any]:
-    candidates = len(representation_candidates(representation))
+    candidates = (
+        int(candidate_count_override)
+        if candidate_count_override is not None
+        else len(representation_candidates(representation))
+    )
     supports = [edge.support for edge in graph if np.isfinite(edge.support)]
     lag_supports = [edge.lag_support for edge in graph if np.isfinite(edge.lag_support)]
     lag_stds = [edge.lag_std for edge in graph if np.isfinite(edge.lag_std)]
@@ -62,13 +72,83 @@ def _metric_row(
     }
 
 
+def _merge_metric_fields(
+    metadata: dict[str, Any], metrics: dict[str, Any]
+) -> dict[str, Any]:
+    overlap = sorted(set(metadata) & set(metrics))
+    if overlap:
+        raise ValueError(f"metric fields would be silently overwritten: {overlap}")
+    return {**metadata, **metrics}
+
+
 def _support_rate(frame: pd.DataFrame) -> float:
     if frame.empty or "primary_class" not in frame.columns:
         return float("nan")
-    applicable = frame[frame["primary_class"] != "not_applicable"]
+    edge_level = aggregate_edge_intervention_evidence(frame)
+    applicable = edge_level[edge_level["edge_class"] != "not_applicable"]
     if applicable.empty:
         return float("nan")
-    return float(np.mean(applicable["primary_class"] == "supported"))
+    return float(np.mean(applicable["edge_class"] == "supported"))
+
+
+def _robustness_bootstrap_job(payload: dict[str, Any]) -> dict[str, Any]:
+    """Execute one outer-parallel robustness condition without nested pools."""
+
+    started = time.perf_counter()
+    if payload.get("point_only", False):
+        blocks = prepare_target_blocks(
+            payload["frames"], payload["candidates"], payload["maximum_lag"]
+        )
+        graph = discover_point_graph_from_blocks(
+            blocks, payload["parent_alpha"], payload["fdr_alpha"]
+        )
+        summary = None
+    else:
+        graph, summary = discover_bootstrap_graph(
+            payload["frames"], payload["candidates"], payload["maximum_lag"],
+            payload["parent_alpha"], payload["fdr_alpha"],
+            payload["bootstrap_repetitions"], payload["support_threshold"],
+            payload["master_seed"], payload["seed_label"], 1,
+        )
+    vote = (
+        discover_vote_graph(
+            payload["frames"], payload["candidates"], payload["maximum_lag"],
+            payload["parent_alpha"], payload["fdr_alpha"],
+            payload["vote_threshold"],
+        )
+        if payload.get("include_vote", False)
+        else None
+    )
+    return {
+        "job_index": payload["job_index"],
+        "graph": graph,
+        "summary": summary,
+        "vote": vote,
+        "runtime_seconds": time.perf_counter() - started,
+    }
+
+
+def _execute_robustness_bootstrap_jobs(
+    payloads: list[dict[str, Any]],
+    executor: Executor | None,
+    progress_callback: Callable[[int, int, dict[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    if executor is None:
+        for payload in payloads:
+            results.append(_robustness_bootstrap_job(payload))
+            if progress_callback:
+                progress_callback(len(results), len(payloads), payload)
+    else:
+        futures = {
+            executor.submit(_robustness_bootstrap_job, payload): payload
+            for payload in payloads
+        }
+        for future in as_completed(futures):
+            results.append(future.result())
+            if progress_callback:
+                progress_callback(len(results), len(payloads), futures[future])
+    return sorted(results, key=lambda item: int(item["job_index"]))
 
 
 def run_functional_ablations(
@@ -249,14 +329,11 @@ def run_data_efficiency(
     baseline_dataset: pd.DataFrame,
     workers: int,
     progress_callback: Callable[[str, int, int, str], None] | None = None,
+    *,
+    executor: Executor | None = None,
 ) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    total_jobs = (
-        len(representations)
-        * len(config["evaluation"]["trajectory_counts"])
-        * int(config["evaluation"]["repeated_subsampling_repetitions"])
-    )
-    completed = 0
+    jobs: list[dict[str, Any]] = []
+    metadata: dict[int, dict[str, Any]] = {}
     for scenario, representation in sorted(representations.items()):
         by_seed = trajectories(baseline_dataset, scenario)
         all_frames = [by_seed[seed] for seed in sorted(by_seed)]
@@ -281,73 +358,105 @@ def run_data_efficiency(
                     )
                 )
                 frames = [all_frames[int(index)] for index in indices]
-                graph, summary = discover_bootstrap_graph(
-                    frames,
-                    candidates,
-                    int(config["temporal"]["maximum_lag"]),
-                    float(config["temporal"]["parent_alpha"]),
-                    float(config["temporal"]["fdr_alpha"]),
-                    int(config["evaluation"]["data_efficiency_bootstrap_repetitions"]),
-                    float(config["temporal"]["support_threshold"]),
-                    int(config["master_seed"]),
-                    f"{scenario}:efficiency:{trajectory_count}:{repetition}",
-                    workers,
-                )
-                metrics = _metric_row(scenario, "full_method", graph, representation)
-                edge_low, edge_high = _bootstrap_metric_interval(
-                    summary, "temporal_qualification_rate", candidate_count
-                )
-                stability_low, stability_high = _bootstrap_metric_interval(
-                    summary, "stability", candidate_count
-                )
-                rows.append(
+                job_index = len(jobs)
+                jobs.append(
                     {
-                        "scenario": scenario,
-                        "method": "full_method",
-                        "trajectory_count": trajectory_count,
-                        "repetition": repetition,
-                        "temporal_qualification_rate": metrics["temporal_qualification_rate"],
-                        "stability": metrics["stability"],
-                        "temporal_qualification_rate_ci_low": edge_low,
-                        "temporal_qualification_rate_ci_high": edge_high,
-                        "stability_ci_low": stability_low,
-                        "stability_ci_high": stability_high,
+                        "job_index": job_index,
+                        "frames": frames,
+                        "candidates": candidates,
+                        "maximum_lag": int(config["temporal"]["maximum_lag"]),
+                        "parent_alpha": float(config["temporal"]["parent_alpha"]),
+                        "fdr_alpha": float(config["temporal"]["fdr_alpha"]),
+                        "bootstrap_repetitions": int(
+                            config["evaluation"]["data_efficiency_bootstrap_repetitions"]
+                        ),
+                        "support_threshold": float(config["temporal"]["support_threshold"]),
+                        "master_seed": int(config["master_seed"]),
+                        "seed_label": f"{scenario}:efficiency:{trajectory_count}:{repetition}",
+                        "point_only": int(trajectory_count) == 1,
+                        "include_vote": True,
+                        "vote_threshold": float(config["temporal"]["vote_threshold"]),
                     }
                 )
-                vote = discover_vote_graph(
-                    frames,
-                    candidates,
-                    int(config["temporal"]["maximum_lag"]),
-                    float(config["temporal"]["parent_alpha"]),
-                    float(config["temporal"]["fdr_alpha"]),
-                    float(config["temporal"]["vote_threshold"]),
-                )
-                vote_metrics = _metric_row(
-                    scenario, "trajectory_vote", vote, representation
-                )
-                rows.append(
-                    {
-                        "scenario": scenario,
-                        "method": "trajectory_vote",
-                        "trajectory_count": trajectory_count,
-                        "repetition": repetition,
-                        "temporal_qualification_rate": vote_metrics["temporal_qualification_rate"],
-                        "stability": vote_metrics["stability"],
-                        "temporal_qualification_rate_ci_low": np.nan,
-                        "temporal_qualification_rate_ci_high": np.nan,
-                        "stability_ci_low": np.nan,
-                        "stability_ci_high": np.nan,
-                    }
-                )
-                completed += 1
-                if progress_callback:
-                    progress_callback(
-                        "Data efficiency",
-                        completed,
-                        total_jobs,
-                        f"{scenario}:n={trajectory_count}:rep={repetition}",
-                    )
-    frame = pd.DataFrame(rows)
+                metadata[job_index] = {
+                    "scenario": scenario,
+                    "representation": representation,
+                    "trajectory_count": int(trajectory_count),
+                    "repetition": repetition,
+                    "candidate_count": candidate_count,
+                }
+
+    def progress(done: int, total: int, payload: dict[str, Any]) -> None:
+        if progress_callback:
+            item = metadata[int(payload["job_index"])]
+            progress_callback(
+                "Data efficiency", done, total,
+                f"{item['scenario']}:n={item['trajectory_count']}:rep={item['repetition']}",
+            )
+
+    outputs = _execute_robustness_bootstrap_jobs(jobs, executor, progress)
+    rows: list[dict[str, Any]] = []
+    for output in outputs:
+        item = metadata[int(output["job_index"])]
+        scenario = item["scenario"]
+        representation = item["representation"]
+        trajectory_count = item["trajectory_count"]
+        repetition = item["repetition"]
+        candidate_count = item["candidate_count"]
+        graph = output["graph"]
+        summary = output["summary"]
+        metrics = _metric_row(scenario, "full_method", graph, representation)
+        estimable = trajectory_count > 1
+        if estimable:
+            edge_low, edge_high = _bootstrap_metric_interval(
+                summary, "temporal_qualification_rate", candidate_count
+            )
+            stability_low, stability_high = _bootstrap_metric_interval(
+                summary, "stability", candidate_count
+            )
+        else:
+            edge_low = edge_high = stability_low = stability_high = np.nan
+        rows.append(
+            {
+                "scenario": scenario,
+                "method": "full_method",
+                "trajectory_count": trajectory_count,
+                "repetition": repetition,
+                "temporal_qualification_rate": metrics["temporal_qualification_rate"],
+                "stability": metrics["stability"] if estimable else np.nan,
+                "lag_support": metrics["lag_support"] if estimable else np.nan,
+                "lag_std": metrics["lag_std"] if estimable else np.nan,
+                "stability_estimable": estimable,
+                "temporal_qualification_rate_ci_low": edge_low,
+                "temporal_qualification_rate_ci_high": edge_high,
+                "stability_ci_low": stability_low,
+                "stability_ci_high": stability_high,
+            }
+        )
+        vote_metrics = _metric_row(
+            scenario, "trajectory_vote", output["vote"], representation
+        )
+        rows.append(
+            {
+                "scenario": scenario,
+                "method": "trajectory_vote",
+                "trajectory_count": trajectory_count,
+                "repetition": repetition,
+                "temporal_qualification_rate": vote_metrics["temporal_qualification_rate"],
+                "stability": vote_metrics["stability"] if estimable else np.nan,
+                "lag_support": vote_metrics["lag_support"] if estimable else np.nan,
+                "lag_std": vote_metrics["lag_std"] if estimable else np.nan,
+                "stability_estimable": estimable,
+                "temporal_qualification_rate_ci_low": np.nan,
+                "temporal_qualification_rate_ci_high": np.nan,
+                "stability_ci_low": np.nan,
+                "stability_ci_high": np.nan,
+            }
+        )
+    frame = pd.DataFrame(rows).sort_values(
+        ["scenario", "method", "trajectory_count", "repetition"],
+        ignore_index=True,
+    )
     frame.to_csv(
         run_root / "analysis" / "data_efficiency_repeated_subsampling.csv",
         index=False,
@@ -401,8 +510,9 @@ def run_observation_robustness(
     baseline_dataset: pd.DataFrame,
     workers: int,
     progress_callback: Callable[[str, int, int, str], None] | None = None,
+    *,
+    executor: Executor | None = None,
 ) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
     repetitions = int(config["robustness"]["repetitions"])
     conditions = [
         ("observation_noise", float(level), 0.0, float(config["temporal"]["support_threshold"]))
@@ -414,8 +524,8 @@ def run_observation_robustness(
         ("support_threshold", 0.0, 0.0, float(level))
         for level in config["robustness"]["support_thresholds"]
     ]
-    total = len(representations) * len(conditions) * repetitions
-    completed = 0
+    jobs: list[dict[str, Any]] = []
+    metadata: dict[int, dict[str, Any]] = {}
     for scenario, representation in sorted(representations.items()):
         by_seed = trajectories(baseline_dataset, scenario)
         original_frames = [by_seed[seed] for seed in sorted(by_seed)]
@@ -433,41 +543,69 @@ def run_observation_robustness(
                         repetition,
                     ),
                 )
-                graph, _ = discover_bootstrap_graph(
-                    frames,
-                    candidates,
-                    int(config["temporal"]["maximum_lag"]),
-                    float(config["temporal"]["parent_alpha"]),
-                    float(config["temporal"]["fdr_alpha"]),
-                    int(config["robustness"]["bootstrap_repetitions"]),
-                    threshold,
-                    int(config["master_seed"]),
-                    f"{scenario}:{factor}:{noise}:{missing}:{threshold}:{repetition}",
-                    workers,
-                )
-                metrics = _metric_row(
-                    scenario, factor, graph, representation
-                )
-                rows.append(
+                job_index = len(jobs)
+                jobs.append(
                     {
-                        "scenario": scenario,
-                        "factor": factor,
-                        "noise_level": noise,
-                        "missing_fraction": missing,
+                        "job_index": job_index,
+                        "frames": frames,
+                        "candidates": candidates,
+                        "maximum_lag": int(config["temporal"]["maximum_lag"]),
+                        "parent_alpha": float(config["temporal"]["parent_alpha"]),
+                        "fdr_alpha": float(config["temporal"]["fdr_alpha"]),
+                        "bootstrap_repetitions": int(
+                            config["robustness"]["bootstrap_repetitions"]
+                        ),
                         "support_threshold": threshold,
-                        "repetition": repetition,
-                        "temporal_qualification_rate": metrics["temporal_qualification_rate"],
-                        "stability": metrics["stability"],
-                        "retained_edge_count": len(graph),
-                        "intervention_f1": np.nan,
+                        "master_seed": int(config["master_seed"]),
+                        "seed_label": f"{scenario}:{factor}:{noise}:{missing}:{threshold}:{repetition}",
+                        "point_only": False,
+                        "include_vote": False,
                     }
                 )
-                completed += 1
-                if progress_callback:
-                    progress_callback(
-                        "Observation robustness", completed, total, f"{scenario}:{factor}"
-                    )
-    frame = pd.DataFrame(rows)
+                metadata[job_index] = {
+                    "scenario": scenario,
+                    "representation": representation,
+                    "factor": factor,
+                    "noise": noise,
+                    "missing": missing,
+                    "threshold": threshold,
+                    "repetition": repetition,
+                }
+
+    def progress(done: int, total: int, payload: dict[str, Any]) -> None:
+        if progress_callback:
+            item = metadata[int(payload["job_index"])]
+            progress_callback(
+                "Observation robustness", done, total,
+                f"{item['scenario']}:{item['factor']}",
+            )
+
+    outputs = _execute_robustness_bootstrap_jobs(jobs, executor, progress)
+    rows: list[dict[str, Any]] = []
+    for output in outputs:
+        item = metadata[int(output["job_index"])]
+        graph = output["graph"]
+        metrics = _metric_row(
+            item["scenario"], item["factor"], graph, item["representation"]
+        )
+        rows.append(
+            {
+                "scenario": item["scenario"],
+                "factor": item["factor"],
+                "noise_level": item["noise"],
+                "missing_fraction": item["missing"],
+                "support_threshold": item["threshold"],
+                "repetition": item["repetition"],
+                "temporal_qualification_rate": metrics["temporal_qualification_rate"],
+                "stability": metrics["stability"],
+                "retained_edge_count": len(graph),
+                "intervention_f1": np.nan,
+            }
+        )
+    frame = pd.DataFrame(rows).sort_values(
+        ["scenario", "factor", "noise_level", "missing_fraction", "support_threshold", "repetition"],
+        ignore_index=True,
+    )
     frame.to_csv(run_root / "analysis" / "observation_robustness.csv", index=False)
     return frame
 
@@ -504,7 +642,15 @@ def _corrupt_candidates_and_frames(
             and (scales[source["id"]], scales[target["id"]])
             in {("micro", "meso"), ("meso", "macro")}
         ]
-        for source, target in eligible[:count]:
+        existing = {(item["source"], item["target"]) for item in candidates}
+        eligible = [pair for pair in eligible if pair not in existing]
+        chosen = (
+            rng.choice(len(eligible), size=min(count, len(eligible)), replace=False)
+            if eligible
+            else np.asarray([], dtype=int)
+        )
+        for index in chosen:
+            source, target = eligible[int(index)]
             candidates.append(
                 {
                     "source": source,
@@ -546,6 +692,8 @@ def run_representation_robustness(
     baseline_dataset: pd.DataFrame,
     workers: int,
     progress_callback: Callable[[str, int, int, str], None] | None = None,
+    *,
+    executor: Executor | None = None,
 ) -> pd.DataFrame:
     operators = [
         "irrelevant_indicator",
@@ -556,9 +704,8 @@ def run_representation_robustness(
     ]
     ratios = config["robustness"]["representation_error_ratios"]
     repetitions = int(config["robustness"]["representation_repetitions"])
-    total = len(representations) * len(operators) * len(ratios) * repetitions
-    completed = 0
-    rows: list[dict[str, Any]] = []
+    jobs: list[dict[str, Any]] = []
+    metadata: dict[int, dict[str, Any]] = {}
     for scenario, representation in sorted(representations.items()):
         by_seed = trajectories(baseline_dataset, scenario)
         original_frames = [by_seed[seed] for seed in sorted(by_seed)]
@@ -576,40 +723,82 @@ def run_representation_robustness(
                     candidates, frames = _corrupt_candidates_and_frames(
                         representation, original_frames, operator, float(ratio), seed
                     )
-                    graph, _ = discover_bootstrap_graph(
-                        frames,
-                        candidates,
-                        int(config["temporal"]["maximum_lag"]),
-                        float(config["temporal"]["parent_alpha"]),
-                        float(config["temporal"]["fdr_alpha"]),
-                        int(config["robustness"]["bootstrap_repetitions"]),
-                        float(config["temporal"]["support_threshold"]),
-                        int(config["master_seed"]),
-                        f"{scenario}:{operator}:{ratio}:{repetition}",
-                        workers,
-                    )
-                    metrics = _metric_row(
-                        scenario, operator, graph, representation
-                    )
-                    rows.append(
+                    job_index = len(jobs)
+                    jobs.append(
                         {
-                            "scenario": scenario,
-                            "operator": operator,
-                            "error_ratio": ratio,
-                            "repetition": repetition,
-                            "candidate_edge_count": len(candidates),
-                            **metrics,
+                            "job_index": job_index,
+                            "frames": frames,
+                            "candidates": candidates,
+                            "maximum_lag": int(config["temporal"]["maximum_lag"]),
+                            "parent_alpha": float(config["temporal"]["parent_alpha"]),
+                            "fdr_alpha": float(config["temporal"]["fdr_alpha"]),
+                            "bootstrap_repetitions": int(
+                                config["robustness"]["bootstrap_repetitions"]
+                            ),
+                            "support_threshold": float(config["temporal"]["support_threshold"]),
+                            "master_seed": int(config["master_seed"]),
+                            "seed_label": f"{scenario}:{operator}:{ratio}:{repetition}",
+                            "point_only": False,
+                            "include_vote": False,
                         }
                     )
-                    completed += 1
-                    if progress_callback:
-                        progress_callback(
-                            "Representation robustness",
-                            completed,
-                            total,
-                            f"{scenario}:{operator}:ratio={ratio}",
-                        )
-    frame = pd.DataFrame(rows)
+                    metadata[job_index] = {
+                        "scenario": scenario,
+                        "operator": operator,
+                        "ratio": ratio,
+                        "repetition": repetition,
+                        "representation": representation,
+                        "candidate_count": len(candidates),
+                        "candidate_signature": [
+                            [item["source"], item["target"], item["branch_id"]]
+                            for item in sorted(
+                                candidates,
+                                key=lambda item: (
+                                    item["source"], item["target"], item["branch_id"]
+                                ),
+                            )
+                        ],
+                    }
+
+    def progress(done: int, total: int, payload: dict[str, Any]) -> None:
+        if progress_callback:
+            item = metadata[int(payload["job_index"])]
+            progress_callback(
+                "Representation robustness", done, total,
+                f"{item['scenario']}:{item['operator']}:ratio={item['ratio']}",
+            )
+
+    outputs = _execute_robustness_bootstrap_jobs(jobs, executor, progress)
+    rows: list[dict[str, Any]] = []
+    for output in outputs:
+        item = metadata[int(output["job_index"])]
+        metrics = _metric_row(
+            item["scenario"], item["operator"], output["graph"],
+            item["representation"],
+            candidate_count_override=item["candidate_count"],
+        )
+        rows.append(_merge_metric_fields(
+                        {
+                            "scenario": item["scenario"],
+                            "operator": item["operator"],
+                            "error_ratio": item["ratio"],
+                            "repetition": item["repetition"],
+                            "candidate_set_sha256": hashlib.sha256(
+                                json.dumps(
+                                    item["candidate_signature"],
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            ).hexdigest(),
+                        },
+                        {
+                            key: value
+                            for key, value in metrics.items()
+                            if key not in {"scenario", "variant"}
+                        },
+                    ))
+    frame = pd.DataFrame(rows).sort_values(
+        ["scenario", "operator", "error_ratio", "repetition"], ignore_index=True
+    )
     frame.to_csv(run_root / "analysis" / "representation_robustness.csv", index=False)
     return frame
 
@@ -637,13 +826,26 @@ def run_mechanism_checks(
         metrics = _metric_row(
             scenario, "mechanism_disabled", graph, representation
         )
-        rows.append(
+        variant = config["scenarios"][scenario]["mechanism_variant"]
+        target = mechanism_target_for_variant(scenario, variant)
+        target_edges = [
+            edge for edge in reference_relations(scenario) if edge.mechanism == target
+        ]
+        metrics.update(
             {
-                "scenario": scenario,
-                "mechanism_variant": config["scenarios"][scenario]["mechanism_variant"],
-                **metrics,
+                "mechanism_variant": variant,
+                "targeted_mechanism": target,
+                "targeted_reference_edges": json.dumps(
+                    [[edge.source, edge.target] for edge in target_edges]
+                ),
+                "metric_scope": "overall retained point graph under one targeted mechanism-disabled variant",
+                "interpretation": (
+                    "the targeted propagation pathway may weaken or disappear; "
+                    "unrelated system dynamics are not expected to vanish"
+                ),
             }
         )
+        rows.append(metrics)
     frame = pd.DataFrame(rows)
     frame.to_csv(run_root / "analysis" / "mechanism_disabled_checks.csv", index=False)
     return frame
@@ -741,29 +943,67 @@ def run_robustness_stage(
         workers,
         progress_callback,
     )
-    efficiency = run_data_efficiency(
-        config,
-        run_root,
-        representations,
-        baseline_dataset,
-        workers,
-        progress_callback,
+    data_jobs = (
+        len(representations)
+        * len(config["evaluation"]["trajectory_counts"])
+        * int(config["evaluation"]["repeated_subsampling_repetitions"])
     )
-    observation = run_observation_robustness(
-        config,
-        run_root,
-        representations,
-        baseline_dataset,
-        workers,
-        progress_callback,
+    observation_jobs = (
+        len(representations)
+        * (
+            len(config["robustness"]["noise_levels"])
+            + len(config["robustness"]["missing_fractions"])
+            + len(config["robustness"]["support_thresholds"])
+        )
+        * int(config["robustness"]["repetitions"])
     )
-    representation_robustness = run_representation_robustness(
-        config,
-        run_root,
-        representations,
-        baseline_dataset,
-        workers,
-        progress_callback,
+    representation_jobs = (
+        len(representations)
+        * 5
+        * len(config["robustness"]["representation_error_ratios"])
+        * int(config["robustness"]["representation_repetitions"])
+    )
+    sweep_started = time.perf_counter()
+
+    def run_sweeps(executor: Executor | None):
+        efficiency_frame = run_data_efficiency(
+            config, run_root, representations, baseline_dataset, workers,
+            progress_callback, executor=executor,
+        )
+        observation_frame = run_observation_robustness(
+            config, run_root, representations, baseline_dataset, workers,
+            progress_callback, executor=executor,
+        )
+        representation_frame = run_representation_robustness(
+            config, run_root, representations, baseline_dataset, workers,
+            progress_callback, executor=executor,
+        )
+        return efficiency_frame, observation_frame, representation_frame
+
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            efficiency, observation, representation_robustness = run_sweeps(executor)
+        actual_pool_creations = 1
+    else:
+        efficiency, observation, representation_robustness = run_sweeps(None)
+        actual_pool_creations = 0
+    sweep_wall_time = time.perf_counter() - sweep_started
+    legacy_pool_creations = (
+        data_jobs + observation_jobs + representation_jobs if workers > 1 else 0
+    )
+    pool_profile = {
+        "scientific_evidence": False,
+        "architecture": "one reusable outer robustness process pool; bootstrap workers=1 inside jobs",
+        "workers": workers,
+        "outer_job_count": data_jobs + observation_jobs + representation_jobs,
+        "legacy_estimated_pool_creations": legacy_pool_creations,
+        "actual_pool_creations": actual_pool_creations,
+        "nested_pool_creations": 0,
+        "pool_creation_reduction": legacy_pool_creations - actual_pool_creations,
+        "robustness_sweep_wall_time_seconds": sweep_wall_time,
+    }
+    (run_root / "analysis" / "robustness_pool_profile.json").write_text(
+        json.dumps(pool_profile, indent=2), encoding="utf-8"
     )
     mechanism = run_mechanism_checks(
         config, run_root, representations, complete_dataset
@@ -778,4 +1018,5 @@ def run_robustness_stage(
         "representation_robustness_rows": len(representation_robustness),
         "mechanism_check_rows": len(mechanism),
         "causal_scalability_rows": len(scalability),
+        "robustness_pool_profile": pool_profile,
     }

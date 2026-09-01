@@ -108,7 +108,12 @@ def reference_processes(scenario: str) -> tuple[ReferenceProcess, ...]:
 def reference_relations(scenario: str) -> tuple[ReferenceRelation, ...]:
     prefix = "s" if scenario == "schelling" else "d"
     mechanism_names = (
-        ("satisfaction", "relocation", "interface", "mixing")
+        (
+            "satisfaction",
+            "relocation",
+            "interface",
+            "homophilic_destination_selection",
+        )
         if scenario == "schelling"
         else ("assimilation", "contraction", "repulsion", "rejection")
     )
@@ -132,4 +137,24 @@ def reference_relations(scenario: str) -> tuple[ReferenceRelation, ...]:
 
 
 def disabled_mechanism(scenario: str) -> str:
-    return "relocation" if scenario == "schelling" else "repulsion"
+    return (
+        "homophilic_destination_selection"
+        if scenario == "schelling"
+        else "repulsion"
+    )
+
+
+def mechanism_target_for_variant(scenario: str, mechanism_variant: str) -> str | None:
+    """Map a simulator variant to the exact controlled-reference mechanism."""
+
+    if mechanism_variant == "baseline":
+        return None
+    expected_variant = {
+        "schelling": "disable_homophilic_relocation",
+        "deffuant": "disable_backfire",
+    }[scenario]
+    if mechanism_variant != expected_variant:
+        raise ValueError(
+            f"unknown mechanism variant for {scenario}: {mechanism_variant}"
+        )
+    return disabled_mechanism(scenario)

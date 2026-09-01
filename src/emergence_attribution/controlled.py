@@ -294,6 +294,7 @@ def run_controlled_intervention_stage(
 
     from .interventions import (
         CLASSIFICATION_COLUMNS,
+        aggregate_edge_intervention_evidence,
         classify_edge_interventions,
         estimate_all_effects,
         intervention_testable_edges,
@@ -337,6 +338,11 @@ def run_controlled_intervention_stage(
     classifications.to_csv(
         analysis / "controlled_recovery_intervention_classifications.csv", index=False
     )
+    edge_classifications = aggregate_edge_intervention_evidence(classifications)
+    edge_classifications.to_csv(
+        analysis / "controlled_recovery_edge_intervention_classifications.csv",
+        index=False,
+    )
     results_path = analysis / "controlled_recovery_results.csv"
     results = pd.read_csv(results_path)
     for scenario in representations:
@@ -345,14 +351,14 @@ def run_controlled_intervention_stage(
             sorted(truth), representations[scenario]
         )
         for method in methods:
-            subset = classifications[
-                (classifications["scenario"] == scenario)
-                & (classifications["method"] == method)
+            subset = edge_classifications[
+                (edge_classifications["scenario"] == scenario)
+                & (edge_classifications["method"] == method)
             ]
             supported = {
                 (row.source, row.target)
                 for row in subset.itertuples()
-                if row.primary_class == "supported"
+                if row.edge_class == "supported"
             }
             mask = (results["scenario"] == scenario) & (results["method"] == method)
             metrics = controlled_intervention_recovery_metrics(

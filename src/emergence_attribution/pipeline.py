@@ -213,7 +213,9 @@ def run_stage(
             "data/indicator_trajectories_complete.*",
             "data/controlled_recovery_trajectories_complete.*",
             "analysis/paired_effects.parquet", "analysis/effect_curves.parquet",
-            "analysis/intervention_classifications.csv", "analysis/path_timing_summary.csv",
+            "analysis/intervention_classifications.csv",
+            "analysis/edge_intervention_classifications.csv",
+            "analysis/path_timing_summary.csv",
             "analysis/controlled_recovery_*", "analysis/main_results.csv",
         ])
     elif stage == "prospective":
@@ -228,7 +230,11 @@ def run_stage(
         details = run_robustness_stage(
             config, run_root, representations, baseline, complete, workers, callback
         )
-        outputs = _files(run_root, ["analysis/*.csv", "data/predefined_observable_trajectories_baseline.*"])
+        outputs = _files(run_root, [
+            "analysis/*.csv",
+            "analysis/robustness_pool_profile.json",
+            "data/predefined_observable_trajectories_baseline.*",
+        ])
     elif stage == "export":
         representations = load_frozen_representations(run_root)
         attribution = integrate_evidence(run_root, representations)

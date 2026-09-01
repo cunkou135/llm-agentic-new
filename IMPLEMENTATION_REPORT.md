@@ -32,16 +32,30 @@ The selected semantic representation and structured prospective criteria are fro
 - Prospective sources must be direct micro associations and must follow real candidate-graph paths.
 - Temporal aggregation is a strict typed contract.
 - Continuous entropy requires explicit binning.
-- Full and unrestricted searches use identical OLS, FDR, trajectory-bootstrap, and support settings; only candidate space differs.
+- Unrestricted temporal search removes both structured candidate-edge
+  constraints and semantic branch constraints. It retains the same lag range,
+  OLS formulation, screening threshold, BH procedure, whole-trajectory
+  bootstrap repetitions, and support threshold; its hypothesis space and
+  semantic FDR grouping are no longer structure-constrained.
 - Point and single-trajectory graph records do not fabricate support, lag support, or lag variance.
 - The `without_joint_trajectories` ablation uses the single-trajectory method.
-- The `without_structured_representation` ablation uses the same generated observables with unrestricted candidates and the full bootstrap contract.
+- The `without_structured_representation` ablation uses the same generated
+  observables but removes structured candidate and branch constraints while
+  retaining the same core temporal estimator and full bootstrap contract.
 - All graph methods receive matched intervention evaluation; empty graphs produce missing metrics plus a reason.
 - Direct Micro->Meso and upstream-mediated Meso->Macro classifications use the same matched-seed parameter intervention; generated observables are never manipulated.
 - Full Discovery method rows use their actual candidate denominators, including 756 unrestricted ordered pairs for 28 nodes.
 - The primary attribution object contains Full Method intervention evidence only; comparative methods have a separate CSV.
 - Controlled Recovery uses four branch-local BH-FDR families and rule-consistent direct parameter observables.
 - Prospective absence, wrong direction, order failure, or missing required observational edges is classified as contradiction after successful source manipulation.
+- Prospective `required_candidate_edges` must exactly equal the adjacent frozen
+  prediction path before simulation begins.
+- Single-trajectory data-efficiency rows retain point qualification rates but
+  mark stability, lag support, lag variance, and stability intervals as not
+  estimable.
+- Robustness sweeps reuse one outer process pool, run bootstrap jobs with one
+  inner worker, and create no nested pools. This changes executor lifecycle
+  only, not any statistical setting.
 
 ## Runtime, provenance, and rendering
 

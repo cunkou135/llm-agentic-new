@@ -205,14 +205,21 @@ def figure_4(run_root: Path, output_root: Path, formats: list[str], config: dict
                 median = grouped[metric].median().reindex(x).to_numpy()
                 low = grouped[f"{metric}_ci_low"].median().reindex(x).to_numpy()
                 high = grouped[f"{metric}_ci_high"].median().reindex(x).to_numpy()
-                axes[row_index, column_index].plot(x, median, marker="o", ms=3, color=colour, label=method.replace("_", " "))
+                finite_median = np.isfinite(median)
+                if np.any(finite_median):
+                    axes[row_index, column_index].plot(
+                        x[finite_median], median[finite_median], marker="o", ms=3,
+                        color=colour, label=method.replace("_", " "),
+                    )
                 finite = np.isfinite(low) & np.isfinite(high)
                 if np.any(finite):
                     axes[row_index, column_index].fill_between(x, low, high, where=finite, color=colour, alpha=0.16)
                 axes[row_index, column_index].set(xlabel="Independent trajectories", ylabel=metric.replace("_", " ").title(), title=f"{scenario.title()}: {metric.replace('_', ' ')}")
                 axes[row_index, column_index].set_ylim(0, 1.05)
     for ax in axes.ravel():
-        ax.legend(frameon=False)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(frameon=False)
     for letter, ax in zip("abcd", axes.ravel()):
         _panel(ax, letter)
     return _export(figure, output_root, "figure_4_data_efficiency", formats, config)

@@ -536,11 +536,23 @@ def execute_expression(
             edges = np.asarray(run(node["edges"]), dtype=int)
             result = []
             for row in values:
-                left, right = row[edges[:, 0]], row[edges[:, 1]]
-                if np.std(left) == 0 or np.std(right) == 0:
+                # The simulator graph is undirected.  Include both orientations
+                # so the statistic cannot depend on the stored min/max node-id
+                # ordering of an edge.
+                forward_left, forward_right = row[edges[:, 0]], row[edges[:, 1]]
+                left = np.concatenate([forward_left, forward_right])
+                right = np.concatenate([forward_right, forward_left])
+                finite = np.isfinite(left) & np.isfinite(right)
+                left, right = left[finite], right[finite]
+                if (
+                    not len(left)
+                    or np.std(left) <= 1e-12
+                    or np.std(right) <= 1e-12
+                ):
                     result.append(0.0)
                 else:
-                    result.append(float(np.corrcoef(left, right)[0, 1]))
+                    correlation = float(np.corrcoef(left, right)[0, 1])
+                    result.append(correlation if np.isfinite(correlation) else 0.0)
             return np.asarray(result)
         if op == "network_density":
             edges = np.asarray(run(node["edges"]))

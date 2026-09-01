@@ -44,7 +44,7 @@
     "repetitions": 1,
     "bootstrap_repetitions": 5,
     "representation_error_ratios": [0.0, 0.20],
-    "representation_repetitions": 1,
+    "representation_repetitions": 2,
     "candidate_indicator_counts": [8, 16],
     "scalability_repetitions": 1
   },

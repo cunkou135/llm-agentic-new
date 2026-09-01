@@ -57,6 +57,17 @@ and artifact map.
   violations, and missing required observational edges are falsifications.
 - `analysis/attribution_objects.json` integrates `full_method` evidence only;
   other methods are exported separately for comparison.
+- Unrestricted temporal search removes both structured candidate-edge
+  constraints and semantic branch constraints. It preserves the same lag
+  range, OLS formulation, screening threshold, BH procedure, whole-trajectory
+  bootstrap repetitions, and support threshold; the hypothesis space and FDR
+  grouping are intentionally no longer structure-constrained.
+- Intervention attempts are frozen to an edge-level rule: any explicit
+  directional contradiction overrides support; otherwise at least one support
+  is sufficient even if another applicable attempt is a manipulation failure.
+- A mechanism-disabled check targets one named mechanism pathway. Its overall
+  retained-graph statistics do not imply that all unrelated dynamics should
+  disappear.
 - Source, configuration, prompt, API settings without the key, stage outputs, and final artifacts are hashed.
 - An existing run identifier is never silently overwritten.
 - Toy smoke outputs are physically separate and explicitly marked non-scientific.
@@ -66,6 +77,9 @@ and artifact map.
 ```powershell
 python -m pytest -q
 python smoke_pipeline.py --run-id smoke_local --workers 1
+python benchmark_robustness_pool.py --run-id pool_smoke_local --workers 2
 ```
 
-The first command runs unit tests. The second runs only the deterministic toy wiring path and must never be used as scientific evidence.
+The first command runs unit tests. The other commands are deterministic,
+NON_SCIENTIFIC wiring and process-lifecycle checks and must never be used as
+scientific evidence.

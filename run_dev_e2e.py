@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -22,7 +23,18 @@ from emergence_attribution.pipeline import (  # noqa: E402
 )
 from emergence_attribution.provenance import RunManager  # noqa: E402
 from emergence_attribution.controlled import controlled_representation  # noqa: E402
-from emergence_attribution.interventions import graph_paths  # noqa: E402
+from emergence_attribution.interventions import (  # noqa: E402
+    aggregate_edge_intervention_evidence,
+    eligible_propagation_path_ids,
+    graph_paths,
+)
+from emergence_attribution.dsl import compute_indicator  # noqa: E402
+from emergence_attribution.raw_schemas import public_raw_schema  # noqa: E402
+from emergence_attribution.reference_truth import (  # noqa: E402
+    mechanism_target_for_variant,
+    reference_processes,
+    reference_relations,
+)
 from emergence_attribution.semantic import load_frozen_representations  # noqa: E402
 from emergence_attribution.temporal import load_graph_records  # noqa: E402
 
@@ -48,14 +60,15 @@ def _stage3_coverage(
             (classifications["scenario"] == scenario)
             & (classifications["method"] == "full_method")
         ]
-        applicable = subset[subset["primary_class"] != "not_applicable"]
+        edge_level = aggregate_edge_intervention_evidence(subset)
+        applicable = edge_level[edge_level["edge_class"] != "not_applicable"]
         testable_pairs = {
             (str(row.source), str(row.target)) for row in applicable.itertuples()
         }
         supported_pairs = {
             (str(row.source), str(row.target))
             for row in applicable.itertuples()
-            if row.primary_class == "supported"
+            if row.edge_class == "supported"
         }
         micro_meso = {
             pair for pair in testable_pairs
@@ -116,10 +129,195 @@ def write_dev_stage3_audit(run_root: Path) -> dict:
         controlled_representations,
         load_graph_records(run_root / "analysis" / "controlled_recovery_graphs.jsonl"),
     )
+    config = json.loads(
+        (run_root / "config" / "experiment_config.snapshot.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    mechanism_frame = pd.read_csv(
+        run_root / "analysis" / "mechanism_disabled_checks.csv"
+    )
+    mechanism_expected = {
+        scenario: mechanism_target_for_variant(
+            scenario, config["scenarios"][scenario]["mechanism_variant"]
+        )
+        for scenario in controlled_representations
+    }
+    mechanism_alignment = True
+    for scenario, target in mechanism_expected.items():
+        row = mechanism_frame[mechanism_frame["scenario"] == scenario].iloc[0]
+        target_edges = [
+            edge for edge in reference_relations(scenario) if edge.mechanism == target
+        ]
+        public_source = next(
+            item for item in reference_processes(scenario)
+            if item.process_id == target_edges[0].source
+        )
+        expected_field = (
+            "destination_similarity" if scenario == "schelling"
+            else "interaction_backfire"
+        )
+        mechanism_alignment &= bool(
+            row["targeted_mechanism"] == target
+            and len(target_edges) == 2
+            and expected_field in json.dumps(public_source.computation)
+        )
+
+    representation_robustness = pd.read_csv(
+        run_root / "analysis" / "representation_robustness.csv"
+    )
+    positive_error = representation_robustness[
+        representation_robustness["error_ratio"] > 0
+    ]
+    repetition_checks = positive_error.groupby(
+        ["scenario", "operator", "error_ratio"], dropna=False
+    ).agg(
+        repetitions=("repetition", "nunique"),
+        candidate_sets=("candidate_set_sha256", "nunique"),
+    )
+    random_repetitions = bool(
+        len(repetition_checks)
+        and (repetition_checks["repetitions"] >= 2).all()
+        and (
+            repetition_checks["candidate_sets"]
+            == repetition_checks["repetitions"]
+        ).all()
+    )
+
+    efficiency = pd.read_csv(
+        run_root / "analysis" / "data_efficiency_repeated_subsampling.csv"
+    )
+    n1 = efficiency[efficiency["trajectory_count"] == 1]
+    n1_stability = bool(
+        len(n1)
+        and not n1["stability_estimable"].astype(bool).any()
+        and n1[["stability", "lag_support", "lag_std", "stability_ci_low", "stability_ci_high"]]
+        .isna().all().all()
+    )
+
+    predictions = json.loads(
+        (run_root / "representation" / "prospective_predictions.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    prospective_exact = True
+    for scenario, scenario_predictions in predictions["scenarios"].items():
+        candidates = {
+            (edge["source"], edge["target"])
+            for edge in full_representations[scenario]["candidate_edges"]
+        }
+        for prediction in scenario_predictions:
+            path = prediction["expected_temporal_order"]
+            required = [
+                (edge["source"], edge["target"])
+                for edge in prediction["validation_criteria"]["required_candidate_edges"]
+            ]
+            adjacent = list(zip(path, path[1:]))
+            prospective_exact &= bool(
+                len(required) == len(adjacent)
+                and set(required) == set(adjacent)
+                and set(required).issubset(candidates)
+            )
+
+    expression = {
+        "op": "network_assortativity",
+        "values": {"op": "field", "name": "state_opinion"},
+        "edges": {"op": "field", "name": "network_edges"},
+    }
+    values = np.asarray([[0.1, 0.5, -0.4, 0.9], [0.2, -0.2, 0.8, 0.4]])
+    edges = np.asarray([[0, 1], [0, 3], [1, 2]], dtype=int)
+    permutation = np.asarray([2, 0, 3, 1])
+    relabelled_values = np.empty_like(values)
+    relabelled_values[:, permutation] = values
+    original_assortativity = compute_indicator(
+        expression, {"op": "identity"},
+        {"state_opinion": values, "network_edges": edges},
+        public_raw_schema("deffuant"),
+    )
+    relabelled_assortativity = compute_indicator(
+        expression, {"op": "identity"},
+        {
+            "state_opinion": relabelled_values,
+            "network_edges": permutation[edges],
+        },
+        public_raw_schema("deffuant"),
+    )
+    assortativity_invariant = bool(
+        np.allclose(original_assortativity, relabelled_assortativity)
+    )
+
+    controlled_attempts = pd.read_csv(
+        run_root / "analysis" / "controlled_recovery_intervention_classifications.csv"
+    )
+    stored_edge_evidence = pd.read_csv(
+        run_root / "analysis" / "controlled_recovery_edge_intervention_classifications.csv"
+    )
+    recomputed_edge_evidence = aggregate_edge_intervention_evidence(controlled_attempts)
+    edge_evidence_matches = bool(
+        stored_edge_evidence.sort_values(
+            ["scenario", "method", "source", "target"]
+        ).reset_index(drop=True).equals(
+            recomputed_edge_evidence.sort_values(
+                ["scenario", "method", "source", "target"]
+            ).reset_index(drop=True)
+        )
+    )
+    precedence_probe = aggregate_edge_intervention_evidence(
+        pd.DataFrame(
+            [
+                {"scenario": "probe", "source": "a", "target": "b", "primary_class": "supported"},
+                {"scenario": "probe", "source": "a", "target": "b", "primary_class": "directionally_contradicted"},
+            ]
+        )
+    )
+    edge_aggregation = bool(
+        edge_evidence_matches
+        and precedence_probe.iloc[0]["edge_class"] == "directionally_contradicted"
+    )
+
+    timing = pd.read_csv(run_root / "analysis" / "path_timing_summary.csv")
+    attempts = pd.read_csv(run_root / "analysis" / "intervention_classifications.csv")
+    eligible_paths = eligible_propagation_path_ids(timing, attempts)
+    selected_paths = json.loads(
+        (run_root / "analysis" / "representative_path_selection.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    figure7_filter = all(
+        item.get("path_id") is None or str(item["path_id"]) in eligible_paths
+        for item in selected_paths.get("scenarios", {}).values()
+    )
+    figures = {
+        name: (run_root / "figures" / name).is_file()
+        for name in (
+            "figure_4_data_efficiency.png",
+            "figure_7_multiscale_propagation.png",
+        )
+    }
+    pool_profile = json.loads(
+        (run_root / "analysis" / "robustness_pool_profile.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    pool_lifecycle = bool(
+        pool_profile["actual_pool_creations"] <= 1
+        and pool_profile["nested_pool_creations"] == 0
+        and pool_profile["actual_pool_creations"]
+        < pool_profile["legacy_estimated_pool_creations"]
+    )
     passed = bool(
         set(controlled["scenarios"]) == {"schelling", "deffuant"}
         and controlled["meso_to_macro_testable_edges"] > 0
         and controlled["complete_testable_paths"] > 0
+        and mechanism_alignment
+        and random_repetitions
+        and n1_stability
+        and prospective_exact
+        and assortativity_invariant
+        and edge_aggregation
+        and figure7_filter
+        and all(figures.values())
+        and pool_lifecycle
     )
     audit = {
         "status": "passed" if passed else "failed",
@@ -127,6 +325,20 @@ def write_dev_stage3_audit(run_root: Path) -> dict:
         "real_llm_api_called": False,
         "full_discovery": full,
         "controlled_recovery": controlled,
+        "final_prerun_checks": {
+            "mechanism_disabled_semantic_alignment": mechanism_alignment,
+            "representation_repetitions_distinct": random_repetitions,
+            "single_trajectory_stability_missing": n1_stability,
+            "prospective_required_edges_exact": prospective_exact,
+            "undirected_assortativity_relabel_invariant": assortativity_invariant,
+            "edge_level_contradiction_precedence": edge_aggregation,
+            "figure_4_rendered_with_n1_missing": figures["figure_4_data_efficiency.png"],
+            "figure_7_complete_ordered_supported_only": bool(
+                figures["figure_7_multiscale_propagation.png"] and figure7_filter
+            ),
+            "robustness_pool_lifecycle": pool_lifecycle,
+        },
+        "robustness_pool_profile": pool_profile,
         **{
             name: controlled[name]
             for name in (
@@ -181,13 +393,13 @@ def main() -> int:
         no_render=False, plot_repo=args.plot_repo,
         completion_provider=mock_completion_provider,
     )
-    audit = write_dev_stage3_audit(resumed.run_root)
     run_selected_stages(
         ["render"], resumed, args.workers,
         PROJECT_ROOT / "config" / "semantic_prompt.txt", llm_path,
         no_render=False, plot_repo=args.plot_repo,
         completion_provider=mock_completion_provider,
     )
+    audit = write_dev_stage3_audit(resumed.run_root)
     print(json.dumps(audit, indent=2))
     print(resumed.run_root.resolve())
     return 0

@@ -61,6 +61,70 @@ INTERVENTION_CLASSES = {
 }
 
 
+def aggregate_edge_intervention_evidence(
+    classifications: pd.DataFrame,
+) -> pd.DataFrame:
+    """Freeze attempt-to-edge aggregation across directions and root routes.
+
+    Explicit directional contradiction has precedence over support.  A support
+    remains sufficient when the other applicable attempt only failed to move
+    the manipulation root, because perturbation strength may be asymmetric.
+    """
+
+    columns = [
+        "scenario", "method", "source", "target", "edge_class",
+        "attempt_count", "applicable_attempt_count", "supported_attempt_count",
+        "contradiction_attempt_count",
+    ]
+    if classifications.empty:
+        return pd.DataFrame(columns=columns)
+    unknown = sorted(
+        set(classifications["primary_class"].astype(str)) - INTERVENTION_CLASSES
+    )
+    if unknown:
+        raise RuntimeError(f"unknown intervention classification values: {unknown}")
+    group_columns = ["scenario"]
+    if "method" in classifications.columns:
+        group_columns.append("method")
+    group_columns.extend(["source", "target"])
+    rows: list[dict[str, Any]] = []
+    for identity, group in classifications.groupby(
+        group_columns, dropna=False, sort=True
+    ):
+        if not isinstance(identity, tuple):
+            identity = (identity,)
+        values = group["primary_class"].astype(str)
+        applicable = values[values != "not_applicable"]
+        if applicable.empty:
+            edge_class = "not_applicable"
+        elif bool((applicable == "directionally_contradicted").any()):
+            edge_class = "directionally_contradicted"
+        elif bool((applicable == "supported").any()):
+            edge_class = "supported"
+        elif bool((applicable == "manipulation_failure").all()):
+            edge_class = "manipulation_failure"
+        elif bool((applicable == "no_stable_downstream_effect").any()):
+            edge_class = "no_stable_downstream_effect"
+        else:
+            edge_class = "inconclusive"
+        row = dict(zip(group_columns, identity))
+        if "method" not in row:
+            row["method"] = ""
+        row.update(
+            {
+                "edge_class": edge_class,
+                "attempt_count": int(len(values)),
+                "applicable_attempt_count": int(len(applicable)),
+                "supported_attempt_count": int((applicable == "supported").sum()),
+                "contradiction_attempt_count": int(
+                    (applicable == "directionally_contradicted").sum()
+                ),
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows, columns=columns)
+
+
 def detect_onset(
     values: np.ndarray,
     significant: np.ndarray,
@@ -648,17 +712,17 @@ def eligible_propagation_path_ids(
 ) -> set[str]:
     """Select complete, significant, ordered, intervention-supported paths."""
 
-    supported: set[tuple[str, str, str, str, str]] | None = None
+    supported: set[tuple[str, str, str]] | None = None
     if classifications is not None:
         required = {"scenario", "parameter", "direction", "source", "target", "primary_class"}
         if not required.issubset(classifications.columns):
             raise ValueError("intervention classifications lack propagation-filter columns")
-        evidence = classifications
+        evidence = aggregate_edge_intervention_evidence(classifications)
         if "method" in evidence.columns:
             evidence = evidence[evidence["method"] == "full_method"]
-        evidence = evidence[evidence["primary_class"].isin(allowed_classes)]
+        evidence = evidence[evidence["edge_class"].isin(allowed_classes)]
         supported = {
-            (str(row.scenario), str(row.parameter), str(row.direction), str(row.source), str(row.target))
+            (str(row.scenario), str(row.source), str(row.target))
             for row in evidence.itertuples()
         }
     valid_ids: set[str] = set()
@@ -679,12 +743,10 @@ def eligible_propagation_path_ids(
             first = order.iloc[0]
             keys = {
                 (
-                    str(first["scenario"]), str(first["parameter"]), str(first["direction"]),
-                    str(first["source"]), str(first["meso"]),
+                    str(first["scenario"]), str(first["source"]), str(first["meso"]),
                 ),
                 (
-                    str(first["scenario"]), str(first["parameter"]), str(first["direction"]),
-                    str(first["meso"]), str(first["macro"]),
+                    str(first["scenario"]), str(first["meso"]), str(first["macro"]),
                 ),
             }
             if not keys.issubset(supported):
@@ -778,6 +840,9 @@ def run_intervention_stage(
     curves.to_parquet(analysis_root / "effect_curves.parquet", index=False)
     classification_frame.to_csv(
         analysis_root / "intervention_classifications.csv", index=False
+    )
+    aggregate_edge_intervention_evidence(classification_frame).to_csv(
+        analysis_root / "edge_intervention_classifications.csv", index=False
     )
     timing_frame.to_csv(analysis_root / "path_timing_summary.csv", index=False)
     selection = select_representative_paths(

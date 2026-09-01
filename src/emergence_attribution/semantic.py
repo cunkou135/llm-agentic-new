@@ -367,9 +367,13 @@ def validate_generation(
             errors.append(
                 f"prediction {prediction.prediction_id}: all downstream responses must be required"
             )
-        if not set(required_path).issubset(required_edges):
+        if (
+            required_edges != set(required_path)
+            or len(criteria.required_candidate_edges) != len(required_path)
+        ):
             errors.append(
-                f"prediction {prediction.prediction_id}: validation criteria omit candidate path edges"
+                f"prediction {prediction.prediction_id}: required_candidate_edges must "
+                "exactly equal the adjacent expected_temporal_order path"
             )
     signatures = [
         json.dumps(computation_signature(item.computation), sort_keys=True)

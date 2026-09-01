@@ -10,7 +10,11 @@ import numpy as np
 
 from .dsl import compute_indicator
 from .raw_schemas import raw_schema
-from .reference_truth import disabled_mechanism, reference_processes, reference_relations
+from .reference_truth import (
+    mechanism_target_for_variant,
+    reference_processes,
+    reference_relations,
+)
 
 
 def counter_rng(seed: int, step: int, stream: int) -> np.random.Generator:
@@ -101,7 +105,7 @@ def _attach_controlled_channels(
     prefix = "s" if scenario == "schelling" else "d"
     meso = np.empty((int(raw["num_steps"][0]), 4), dtype=float)
     macro = np.empty_like(meso)
-    disabled_name = disabled_mechanism(scenario)
+    disabled_name = mechanism_target_for_variant(scenario, mechanism_variant)
     for index in range(4):
         edge = next(item for item in micro_to_meso if item.target == f"{prefix}_meso_{index}")
         process = processes[edge.source]
@@ -118,7 +122,7 @@ def _attach_controlled_channels(
             seed,
             700 + index,
             0.45,
-            mechanism_variant != "baseline" and edge.mechanism == disabled_name,
+            edge.mechanism == disabled_name,
         )
         second = next(item for item in relations if item.source == f"{prefix}_meso_{index}")
         macro[:, index] = _delayed_channel(
@@ -128,7 +132,7 @@ def _attach_controlled_channels(
             seed,
             800 + index,
             0.70,
-            mechanism_variant != "baseline" and second.mechanism == disabled_name,
+            second.mechanism == disabled_name,
         )
     return {"mechanism_channel": np.column_stack([meso, macro]).astype(np.float32)}
 
@@ -146,6 +150,7 @@ def simulate_schelling(
     parameters: dict[str, float],
     mechanism_variant: str = "baseline",
 ) -> dict[str, np.ndarray]:
+    mechanism_target_for_variant("schelling", mechanism_variant)
     steps = int(spec["num_steps"])
     agents = int(spec["num_agents"])
     height, width = int(spec["grid_height"]), int(spec["grid_width"])
@@ -251,6 +256,7 @@ def simulate_deffuant(
     parameters: dict[str, float],
     mechanism_variant: str = "baseline",
 ) -> dict[str, np.ndarray]:
+    mechanism_target_for_variant("deffuant", mechanism_variant)
     steps, agents = int(spec["num_steps"]), int(spec["num_agents"])
     edges = _opinion_network(
         seed, agents, int(spec["network_degree"]), float(spec["network_rewire_probability"])

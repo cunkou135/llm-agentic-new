@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from .reference_truth import reference_processes, reference_relations
+from .interventions import aggregate_edge_intervention_evidence
 from .temporal import TemporalEdge, load_graph_records, unrestricted_candidates
 
 
@@ -49,25 +50,39 @@ def intervention_classification_rates(
     contradiction numerator.
     """
 
-    if bool((classifications["primary_class"] == "contradicted").any()):
-        raise RuntimeError(
-            "legacy intervention class 'contradicted' is forbidden; "
-            "use 'directionally_contradicted'"
+    identity_columns = {"scenario", "source", "target"}
+    if not identity_columns.issubset(classifications.columns):
+        # Retain a narrow compatibility path for callers that only provide a
+        # vector of attempt classes.  Production outputs always carry edge
+        # identities and therefore use the frozen edge-level rule below.
+        applicable = classifications[
+            classifications["primary_class"] != "not_applicable"
+        ]
+        if applicable.empty:
+            return np.nan, np.nan, "no_applicable_intervention_classifications"
+        return (
+            float(np.mean(applicable["primary_class"] == "supported")),
+            float(
+                np.mean(
+                    applicable["primary_class"] == "directionally_contradicted"
+                )
+            ),
+            "applicable_attempts_without_edge_identity;"
+            "manipulation_failure_included",
         )
-    applicable = classifications[
-        classifications["primary_class"] != "not_applicable"
-    ]
+    edge_level = aggregate_edge_intervention_evidence(classifications)
+    applicable = edge_level[edge_level["edge_class"] != "not_applicable"]
     if applicable.empty:
         return np.nan, np.nan, "no_applicable_intervention_classifications"
     return (
-        float(np.mean(applicable["primary_class"] == "supported")),
+        float(np.mean(applicable["edge_class"] == "supported")),
         float(
             np.mean(
-                applicable["primary_class"] == "directionally_contradicted"
+                applicable["edge_class"] == "directionally_contradicted"
             )
         ),
-        "applicable_attempts_excluding_not_applicable;"
-        "manipulation_failure_included_in_denominator",
+        "applicable_edges_after_frozen_attempt_aggregation;"
+        "directional_contradiction_precedes_support",
     )
 
 

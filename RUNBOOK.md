@@ -102,6 +102,18 @@ request/response 不会被静默覆盖。
 - Full Discovery 的 contradiction rate 分母为除 `not_applicable` 外的全部适用尝试；`manipulation_failure` 保留在分母中。
 - Controlled intervention recall 的分母仅包含具有合法 manipulation route 的 truth edges；其余 truth edges 为 `not_applicable`，不是 false negative。
 - unrestricted temporal qualification 使用实际 `N*(N-1)` candidate space；28 个节点时分母为 756。
+- unrestricted temporal search 同时移除 structured candidate-edge constraints
+  和 semantic branch constraints；lag range、OLS、screening threshold、BH
+  procedure、whole-trajectory bootstrap repetitions 与 support threshold 保持
+  不变。也就是说核心估计/重采样过程一致，但 hypothesis space 与 semantic
+  FDR grouping 不再受结构约束。
+- `without_structured_representation` 使用同一定义，不应描述为“仅 candidate
+  space 不同”。
+- 干预先按 source->target 聚合：任何 `directionally_contradicted` 优先于
+  `supported`；若无明确矛盾，至少一个 `supported` 可覆盖另一侧的
+  `manipulation_failure`。
+- `mechanism_disabled_checks.csv` 的整体 retained-graph 指标只描述一个目标
+  机制被禁用后的点图；不要求或暗示所有无关系统 dynamics 消失。
 - Figure 7 只接受 Micro/Meso/Macro 均显著、onset 有序且两条 Full Method intervention edge 均为 `supported` 的路径。
 
 程序会核对 source/config/API-public-config/stage artifact hashes。已经验证成功的 task 或 stage 会跳过；hash 不一致会 fail closed，并要求新 run-id。不要手工修改 run 内 CSV、JSON、Parquet、NPZ 或图数据。

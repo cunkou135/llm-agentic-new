@@ -1,77 +1,72 @@
-# Final pre-run scientific-logic audit
+# Final pre-run audit
 
 Audit date: 2026-09-02
 
-This audit covers the current source tree after the final scientific-logic
-remediation. No formal 24-seed experiment and no real LLM API call were made.
-The toy and development outputs cited below are explicitly NON_SCIENTIFIC.
+Scope: current project only. No real LLM API, formal 24-seed experiment,
+formal 100-repetition trajectory bootstrap suite, or formal 500-repetition
+paired bootstrap suite was run. All cited executions are NON_SCIENTIFIC.
 
-## Required correction matrix
+## Final correction gates
 
-| Gate | Implemented contract | Verification evidence | Status |
-|---|---|---|---|
-| Stage 3 path-aware propagation | A Micro->Meso retained edge uses a direct Micro parameter root. A Meso->Macro edge resolves a same-branch upstream Micro root and reuses its simulator parameter. Only that parameter is changed; root, edge source, and edge target are observed from the same matched-seed trajectories. Output records `root_source`, `edge_source`, `edge_target`, `manipulation_level`, and `intervention_scope` (`direct_root` or `upstream_mediated`). | Direct-root, upstream-mediated, no-automatic-unmapped, onset-order, and end-to-end coverage checks | PASS |
-| Controlled intervention denominator | Intervention recall is `supported eligible truth / eligible truth`. Truth relations without a legal simulator manipulation route are outside the estimand (`not_applicable`) rather than false negatives. Outputs include eligible/supported truth counts and intervention precision, recall, and F1. | Both dev scenarios report 6 eligible truth edges for Full Method; denominator unit test passes | PASS |
-| Controlled direct manipulation semantics | Schelling `destination_preference` is mapped to `s_micro_destination_similarity = mean(destination_similarity)`, the public observable directly adjacent to destination selection. It is no longer mapped to mean current-location similarity. Other direct mappings remain rule-level gates or update magnitudes. | Rule-consistency unit test and public-field inspection | PASS |
-| Contradiction vocabulary | The only Stage 3 directional contradiction state is `directionally_contradicted`. `contradicted` is rejected as a legacy Stage 3 value. Contradiction rate excludes `not_applicable` but includes `manipulation_failure` in the applicable-attempt denominator. | Vocabulary/rate unit test; dev classification scan contains 0 legacy rows | PASS |
-| Candidate denominator | Structured, single-trajectory, vote, and semantic proposal rows use the structured candidate count. Unrestricted temporal search uses the actual ordered-pair search space. A rate above one raises an error. | Both 28-node dev scenarios report unrestricted count 756; maximum qualification rate is 1.0 | PASS |
-| Prospective falsification | After successful source manipulation, any missing required downstream response, wrong required direction, temporal-order violation, or missing required observational edge is `contradicted`. Only all required evidence passing is `supported`; required absence cannot become partial support. | Missing-Meso, missing-Macro, wrong-direction, and all-pass tests | PASS |
-| Evidence integration | `analysis/attribution_objects.json` reads temporal and intervention evidence only from `full_method`. Non-primary method intervention rows are exported to `analysis/comparative_method_intervention_evidence.csv`. | Dev attribution method set is exactly `full_method`; isolation unit test passes | PASS |
-| Controlled branch-local FDR | Controlled nodes, truth candidates, and distractors use exactly four explicit families: `controlled_branch_0` through `controlled_branch_3`. | Both controlled representations expose four unique branch IDs; branch-local tests pass | PASS |
-| Semantic resume | Each generation writes immutable prompt/request/response history, a checkpoint containing artifact and accepted-payload hashes, and a `generation_result.sha256` sidecar. Resume verifies all hashes and the current semantic contract before skipping. Completed generations and repair history cannot be silently overwritten. | Simulated two-complete/third-fails/resume test; 4/4 dev results have checkpoint metadata and sidecars | PASS |
-| Figure 7 propagation filter | Eligible paths require significant Micro, Meso, and Macro responses; ordered onsets; and `supported` Full Method intervention classifications for both Micro->Meso and Meso->Macro edges. Macro magnitude ranks only paths that pass these gates. | Incomplete/unordered path test passes; dev rendering honestly displays no Full Discovery path rather than plotting unsupported propagation | PASS |
+| Gate | Issue | Old behavior | New behavior | Test | Status |
+|---|---|---|---|---|---|
+| Mechanism-disabled semantic alignment | Schelling public and hidden paths disabled different mechanisms. | Public simulation removed destination preference while hidden recovery disabled relocation. | `disable_homophilic_relocation` targets the `destination_similarity -> s_meso_3 -> s_macro_3` homophilic-destination-selection branch. Deffuant `disable_backfire` targets the repulsion branch in both paths. | `test_schelling_public_and_hidden_disabled_mechanism_are_aligned`; `test_deffuant_public_and_hidden_disabled_mechanism_are_aligned`; dev gate | PASS |
+| Representation robustness denominator | Mutated candidate counts could be overwritten by the original count. | Qualification used the original structured denominator. | `_metric_row` accepts the actual candidate count; collision-safe metric merging prevents silent duplicate-key replacement. | Candidate-count, qualification-denominator, and duplicate-key regression tests | PASS |
+| Single-trajectory stability semantics | Resampling one trajectory could look perfectly stable. | n=1 bootstrap support could be reported as stability 1. | n=1 retains the point graph and qualification rate; stability, lag support/SD, and stability intervals are missing with `stability_estimable=false`. | n=1 semantics and Figure 4 tests; dev CSV gate | PASS |
+| Undirected assortativity | Sorted endpoint IDs affected the numeric correlation. | Only stored `(min_id,max_id)` orientation was used. | Both orientations of every undirected edge are included; constant input has the fixed result 0. | Relabel-invariance and constant-value tests; dev gate | PASS |
+| Prospective exact required path | Required edges could contain missing or extra relations. | The expected path only had to be included. | Required edges must exactly equal adjacent frozen temporal-order edges and all must be candidate edges. | Exact, missing, extra, and non-candidate cases | PASS |
+| Random perturbation repetitions | Cross-branch errors could reuse the same prefix in every repetition. | `eligible[:count]` made repeated error sets identical. | Seeded sampling without replacement is deterministic within a repetition and distinct across repetitions; all other perturbation operators were also checked. | Cross-branch and all-operator repetition tests; dev candidate-set hashes | PASS |
+| Edge-level intervention aggregation | One support could hide an explicit contradiction. | Controlled F1 accepted any supported attempt. | `not_applicable` is excluded; contradiction precedes support; otherwise one support is sufficient; all failures remain failure; downstream-effect absence then inconclusive follow. Full Discovery, Controlled Recovery, Figure 7 filtering, and summaries reuse this rule. | Aggregation precedence and Controlled F1 tests; dev edge-output gate | PASS |
+| Robustness multiprocessing lifecycle | Every robustness fit could create and destroy a Windows process pool. | Development-shaped workload implied 60 pool lifecycles. | One reusable outer pool executes condition jobs; each bootstrap job uses one inner worker; nested pools are prohibited. Statistical settings are unchanged. | workers=1/workers=N equality and performance smoke | PASS |
 
-## Frozen method settings
+## Method wording and unchanged contracts
 
-The formal configuration remains unchanged:
+Unrestricted temporal search removes structured candidate-edge constraints and
+semantic branch constraints while retaining the same lag range, OLS
+formulation, screening threshold, BH procedure, whole-trajectory bootstrap
+repetitions, and support threshold. The hypothesis space and semantic FDR
+grouping are therefore different, but the core temporal estimation and
+bootstrap procedure are unchanged. `without_structured_representation` uses
+this same definition.
 
-- 16 Micro, 8 Meso, and 4 Macro generated observables;
-- 28--48 structured candidate edges;
-- level-based lagged OLS with lags 1--5, target self-history, and competing parents;
-- parent screen 0.10 and within-branch BH-FDR 0.05;
-- 100 whole-trajectory bootstrap repetitions and support threshold 0.65;
-- actual simulator parameter interventions with 24 matched seeds;
-- minus/baseline/plus conditions, 500 paired bootstrap repetitions, and 95% intervals;
-- onset start 0, minimum standardised effect 0.10, four consecutive steps;
-- evaluation start 15 and lag tolerance 2.
+The mechanism-disabled robustness table reports overall point-graph statistics
+after one targeted mechanism is disabled. It tests whether the targeted pathway
+may weaken or disappear; it does not require unrelated dynamics to vanish.
 
-No PCMCI+, DYNOTEARS, packaged Granger method, Pearson substitute,
-difference-only model, post-result threshold change, or direct manipulation of a
-generated indicator was introduced.
+The formal configuration remains at 24 seeds, lags 1--5, parent alpha 0.10,
+within-family BH-FDR 0.05, 100 trajectory bootstraps, support 0.65, 500 paired
+bootstraps, 95% intervals, onset start 0, minimum standardised effect 0.10,
+four consecutive steps, evaluation start 15, and lag tolerance 2. No Stage 2
+estimator or threshold was changed.
 
-## Verification results
+## NON_SCIENTIFIC verification
 
-- Pytest: **66 passed** using `E:\conda\python.exe -m pytest -q`.
-- Toy smoke: **passed**, `scientific_evidence=false`, output
-  `smoke_runs/final_logic_20260902_02/`.
-- NON_SCIENTIFIC development E2E: **passed**, output
-  `dev_runs/final_logic_20260902_02/`.
-- Development scope: Schelling and Deffuant, deterministic mock semantic
-  responses, isolated baseline/intervention simulations, temporal analysis,
-  paired effects, prospective validation, robustness, export, Figure 2--8, and
-  final run freeze.
-- Stage 3 development audit: 6 Micro->Meso testable edges, 7 Meso->Macro
-  testable edges, 3 supported Micro->Meso edges, 3 supported Meso->Macro edges,
-  5 complete testable paths, and 3 complete supported paths in Controlled
-  Recovery. Both scenarios contribute Meso->Macro and complete-path checks.
-- Full Discovery also exercised upstream-mediated classification: 3 testable
-  Meso->Macro retained edges and 2 complete testable paths. Unsupported paths
-  were not promoted to Figure 7.
-- Controlled Full Method eligible-truth denominator: **6 per scenario**.
-- Full Discovery unrestricted candidate denominator: **756 per scenario**.
-- Main attribution intervention method set: **`full_method` only**.
-- Legacy Stage 3 `contradicted` rows: **0**.
-- Development run is frozen and marked `real_llm_api_called=false`.
-- `git diff --check`: **PASS**; line-ending notices are informational only.
+- Pytest: 88 passed.
+- Toy smoke: PASS, `smoke_runs/final_prerun_20260902_01/`.
+- Two-scenario dev E2E: PASS,
+  `dev_runs/final_prerun_20260902_01/`; every stage from semantic through render
+  completed, the run is frozen, and `real_llm_api_called=false`.
+- Dev final gates: mechanism alignment, distinct representation repetitions,
+  n=1 missing stability, exact prospective paths, assortativity relabel
+  invariance, contradiction precedence, Figure 4, Figure 7, and pool lifecycle
+  all passed.
+- Dev robustness profile: 60 outer jobs, 1 actual pool, 0 nested pools, 7.248 s
+  sweep wall time.
+- Lifecycle performance smoke: identical outputs; legacy 60 pools / 301.480 s,
+  reused architecture 1 pool / 5.190 s.
 
 ## Evidence boundary
 
-Passing this audit establishes code-path readiness and repeatable non-scientific
-execution. It does not establish the eventual formal scientific effect sizes,
-support rates, recovery scores, contradictions, prospective outcomes, or
-Figure 7 paths. Those conclusions must come only from the new formal 24-seed
-run with real frozen LLM generations.
+These results establish software and pre-run contract readiness only. They do
+not provide formal scientific effect sizes, recovered relations, support rates,
+contradiction rates, prospective outcomes, or paper figures.
 
 ## FORMAL RUN READINESS
 
 **READY**
+
+Unique formal command (run only after configuring the real local LLM key):
+
+```powershell
+E:\conda\python.exe run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_acl2026_20260902_01 --workers auto --plot-repo "..\llm-agentic-dis"
+```

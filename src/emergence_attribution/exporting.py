@@ -27,8 +27,12 @@ CORE_ANALYSIS_FILES = [
     "path_timing_summary.csv",
     "representative_path_selection.json",
     "intervention_classifications.csv",
+    "edge_intervention_classifications.csv",
+    "controlled_recovery_edge_intervention_classifications.csv",
     "comparative_method_intervention_evidence.csv",
     "observation_robustness.csv",
+    "representation_robustness.csv",
+    "robustness_pool_profile.json",
     "causal_scalability.csv",
     "prospective_validation.csv",
 ]
