@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+config/llm_api.local.json
+runs/
+dist/
+build/
+*.egg-info/
+

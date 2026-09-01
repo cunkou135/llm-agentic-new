@@ -1,0 +1,158 @@
+# 正式运行手册
+
+## 0. 一次性安装
+
+在本目录打开 PowerShell：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -e ".[test]"
+Copy-Item config\llm_api.example.json config\llm_api.local.json
+```
+
+## 第一步：填写 API
+
+编辑 `config\llm_api.local.json`：
+
+```json
+{
+  "base_url": "你的 OpenAI-compatible base URL",
+  "api_key": "你的密钥",
+  "model": "你的模型名",
+  "temperature": 0.1,
+  "max_tokens": 12000,
+  "timeout": 300,
+  "max_retries": 2
+}
+```
+
+只有 `src\emergence_attribution\llm_client.py` 会访问模型 API。local 文件已加入 `.gitignore`；provenance 只保存脱敏配置，不保存明文密钥。缺少密钥时 semantic stage 会直接失败，不会用 mock 替代正式输出。
+
+## 第二步：执行正式实验
+
+推荐先完成全部科学计算和导出，暂不绘图：
+
+```powershell
+.\.venv\Scripts\python run_experiment.py `
+  --config config\experiment.json `
+  --llm-config config\llm_api.local.json `
+  --run-id rerun_001 `
+  --workers auto `
+  --no-render
+```
+
+也可以指定进程数：
+
+```powershell
+.\.venv\Scripts\python run_experiment.py `
+  --config config\experiment.json `
+  --llm-config config\llm_api.local.json `
+  --run-id rerun_001 `
+  --workers 12 `
+  --no-render
+```
+
+单独运行某一 stage：
+
+```powershell
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage simulation
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage semantic --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage temporal --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage intervention --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage robustness --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage export --resume
+```
+
+## 第三步：查看实时进度
+
+终端会显示 Overall experiment、当前 stage、completed/total、百分比、elapsed、ETA、workers 和当前 scenario/parameter/replicate。
+
+持久进度日志位于：
+
+```text
+runs\rerun_001\logs\progress.jsonl
+```
+
+即使进程异常退出，该 JSONL 也保留最后完成的位置。
+
+## 第四步：失败后 resume
+
+使用原来的 config、LLM model settings、代码和 run-id，加 `--resume`：
+
+```powershell
+.\.venv\Scripts\python run_experiment.py `
+  --config config\experiment.json `
+  --llm-config config\llm_api.local.json `
+  --run-id rerun_001 `
+  --workers auto `
+  --resume `
+  --no-render
+```
+
+程序会核对 source/config/API-public-config/stage artifact hashes。已经验证成功的 task 或 stage 会跳过；hash 不一致会 fail closed，并要求新 run-id。不要手工修改 run 内 CSV、JSON、Parquet、NPZ 或图数据。
+
+## 第五步：正式数据保存位置
+
+全部正式数据位于：
+
+```text
+runs\rerun_001\
+```
+
+关键目录：
+
+- `config\`：冻结的 experiment snapshot 和脱敏 API 配置。
+- `provenance\`：run/source/stage manifests、环境、全部 artifact SHA256。
+- `llm\`：两个场景各三代的 prompt、request、response、repair 和 validation。
+- `representation\`：最终表征、agreement、validation、冻结 prospective predictions。
+- `data\raw_logs\`：新运行生成的 384 个正式原始仿真文件。
+- `data\indicator_trajectories_*.parquet`：由冻结表征计算的 baseline/complete 指标轨迹。
+- `analysis\`：temporal、bootstrap、paired effects、intervention、robustness、prospective validation 和 attribution objects。
+- `visualization_input\`：Figure 2--8 的动态输入 bundle。
+- `figures\`、`tables\`：论文图和表格 source data。
+
+## 第六步：生成 Figure 2--8
+
+从新 run 动态绘图，并读取本地绘图库的 export style 设置：
+
+```powershell
+.\.venv\Scripts\python render_paper_figures.py `
+  --run runs\rerun_001 `
+  --plot-repo "..\llm-agentic-dis" `
+  --formats png svg pdf
+```
+
+需要 TIFF 时加 `tiff`。渲染器动态读取实际 node/branch 名称，不依赖 frozen path、旧 node ID、旧 row count 或旧 hash。它明确使用 mean effect curve、完整 effect-matrix 色域，并以高可见度显示 added edges。
+
+若要把数据 bundle 复制到本地绘图库供单独归档：
+
+```powershell
+.\.venv\Scripts\python export_visualization_bundle.py `
+  --run runs\rerun_001 `
+  --plot-repo "..\llm-agentic-dis"
+```
+
+该命令写入绘图库的 `data\generated_runs\rerun_001\`；若目标已存在会拒绝覆盖。
+
+## 第七步：可直接用于论文的文件
+
+优先使用：
+
+- `analysis\main_results.csv`
+- `analysis\main_graphs.jsonl`
+- `analysis\data_efficiency_repeated_subsampling.csv`
+- `analysis\paired_effects.parquet`
+- `analysis\effect_curves.parquet`
+- `analysis\intervention_classifications.csv`
+- `analysis\path_timing_summary.csv`
+- `analysis\observation_robustness.csv`
+- `analysis\causal_scalability.csv`
+- `analysis\prospective_validation.csv`
+- `analysis\attribution_objects.json`
+- `tables\*_source.csv`
+- `figures\figure_2_*` 至 `figures\figure_8_*`
+- `visualization_input\figure_inputs.generated.json`
+- `visualization_input\SHA256SUMS`
+- `figures\render_manifest.json`
+
+只有 run 完成并生成 `RUN_FROZEN` 后，才把它作为完整正式 release。`smoke_runs\` 下的任何文件都不能用于论文。

@@ -1,0 +1,8 @@
+You are constructing an auditable, executable multiscale representation of an emergent phenomenon in an agent-based simulator.
+
+Use only the supplied scenario rules, controllable parameter descriptions, raw-log field schema, generic computation grammar, representation budget, and structural constraints. Invent the indicator identifiers, scientific meanings, computations, scales, branches, parameter associations, adjacent-scale candidate relations, and prospective predictions yourself.
+
+The computation of every indicator must be a declarative JSON AST from the supplied grammar. Never output Python, source code, or an expression string. Candidate relations are semantic hypotheses only. Do not claim that they have statistical, causal, or intervention support. Prospective predictions must be stated before any simulation statistics are observed and must include an explicit falsification condition.
+
+Return exactly one JSON object matching the supplied schema.
+
