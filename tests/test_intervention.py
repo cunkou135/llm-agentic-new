@@ -8,6 +8,7 @@ from emergence_attribution.interventions import (
     classify_edge_interventions,
     detect_onset,
 )
+from emergence_attribution.temporal import TemporalEdge
 
 
 def _config() -> dict:
@@ -84,6 +85,71 @@ def test_zero_baseline_sd_keeps_raw_effect_but_standardised_is_not_estimable() -
     variable = result["summaries"][1]
     assert variable["baseline_sd"] > 0
     assert np.isfinite(variable["cumulative_effect_standardised"])
+
+
+def test_zero_baseline_sd_classification_is_inconclusive_without_crashing() -> None:
+    baseline = np.zeros((8, 40, 2), dtype=float)
+    intervention = baseline + np.asarray([0.5, 0.2])[None, None, :]
+    result = _effect_job(
+        {
+            "scenario": "toy",
+            "parameter": "strength",
+            "direction": "plus",
+            "node_ids": ["constant", "target"],
+            "scales": {"constant": "micro", "target": "meso"},
+            "baseline": baseline,
+            "intervention": intervention,
+            "config": _config(),
+            "paired": True,
+            "seed": 46,
+        }
+    )
+    effects = pd.DataFrame(result["summaries"])
+    representation = {
+        "indicators": [
+            {
+                "id": "constant",
+                "scale": "micro",
+                "branch_id": "branch_a",
+                "parameter_associations": [
+                    {"parameter": "strength", "relationship": "direct"}
+                ],
+            },
+            {
+                "id": "target",
+                "scale": "meso",
+                "branch_id": "branch_a",
+                "parameter_associations": [],
+            },
+        ],
+        "candidate_edges": [
+            {
+                "source": "constant",
+                "target": "target",
+                "branch_id": "branch_a",
+            }
+        ],
+    }
+    edge = TemporalEdge(
+        source="constant",
+        target="target",
+        lag=1,
+        beta=0.7,
+        p_value=0.001,
+        q_value=0.002,
+        effect_direction="increase",
+        support=0.9,
+        lag_support=0.8,
+        lag_std=0.1,
+        branch_id="branch_a",
+    )
+
+    frame = classify_edge_interventions(
+        "toy", [edge], effects, representation, lag_tolerance=2
+    )
+    plus = frame[frame["direction"] == "plus"].iloc[0]
+    assert np.isnan(plus["source_effect"])
+    assert plus["primary_class"] == "inconclusive"
 
 
 def test_onset_detection_respects_start_and_consecutive_rule() -> None:

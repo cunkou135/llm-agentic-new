@@ -20,7 +20,7 @@ from .interventions import (
     estimate_all_effects,
 )
 from .predefined import predefined_representation
-from .reference_truth import mechanism_target_for_variant, reference_relations
+from .reference_truth import mechanism_target_for_variant
 from .simulation import compile_indicator_dataset, trajectories
 from .temporal import (
     TemporalEdge,
@@ -828,16 +828,10 @@ def run_mechanism_checks(
         )
         variant = config["scenarios"][scenario]["mechanism_variant"]
         target = mechanism_target_for_variant(scenario, variant)
-        target_edges = [
-            edge for edge in reference_relations(scenario) if edge.mechanism == target
-        ]
         metrics.update(
             {
                 "mechanism_variant": variant,
                 "targeted_mechanism": target,
-                "targeted_reference_edges": json.dumps(
-                    [[edge.source, edge.target] for edge in target_edges]
-                ),
                 "metric_scope": "overall retained point graph under one targeted mechanism-disabled variant",
                 "interpretation": (
                     "the targeted propagation pathway may weaken or disappear; "

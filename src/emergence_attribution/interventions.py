@@ -596,8 +596,6 @@ def classify_edge_interventions(
                         else np.nan
                     )
                     lag_difference = delay - edge.lag if np.isfinite(delay) else np.nan
-                    expected_target_sign = int(np.sign(source_effect * edge.beta))
-                    observed_target_sign = int(np.sign(target_effect))
                     propagation_order_ok = bool(
                         root_onset >= 0
                         and source_onset >= root_onset
@@ -608,18 +606,25 @@ def classify_edge_interventions(
                         and np.isfinite(delay)
                         and abs(lag_difference) <= lag_tolerance
                     )
-                    if not root.significant:
+                    if not np.isfinite(root_effect):
+                        evidence = "inconclusive"
+                    elif not root.significant:
                         evidence = "manipulation_failure"
+                    elif not np.isfinite(source_effect) or not np.isfinite(target_effect):
+                        evidence = "inconclusive"
                     elif not source.significant or not target.significant:
                         evidence = "no_stable_downstream_effect"
-                    elif expected_target_sign == 0:
-                        evidence = "inconclusive"
-                    elif observed_target_sign != expected_target_sign:
-                        evidence = "directionally_contradicted"
-                    elif timing_ok:
-                        evidence = "supported"
                     else:
-                        evidence = "inconclusive"
+                        expected_target_sign = int(np.sign(source_effect * edge.beta))
+                        observed_target_sign = int(np.sign(target_effect))
+                        if expected_target_sign == 0:
+                            evidence = "inconclusive"
+                        elif observed_target_sign != expected_target_sign:
+                            evidence = "directionally_contradicted"
+                        elif timing_ok:
+                            evidence = "supported"
+                        else:
+                            evidence = "inconclusive"
                 rows.append(
                     {
                         "scenario": scenario,
@@ -755,7 +760,7 @@ def eligible_propagation_path_ids(
     if classifications is not None:
         required = {
             "scenario", "method", "parameter", "direction",
-            "source", "target", "primary_class",
+            "root_source", "source", "target", "primary_class",
         }
         if not required.issubset(classifications.columns):
             raise ValueError("intervention classifications lack propagation-filter columns")
@@ -778,11 +783,13 @@ def eligible_propagation_path_ids(
             scenario = str(first["scenario"])
             parameter = str(first["parameter"])
             direction = str(first["direction"])
+            root_source = str(first["source"])
             subset = classifications[
                 (classifications["scenario"].astype(str) == scenario)
                 & (classifications["method"] == "full_method")
                 & (classifications["parameter"].astype(str) == parameter)
                 & (classifications["direction"].astype(str) == direction)
+                & (classifications["root_source"].astype(str) == root_source)
             ]
             evidence = aggregate_edge_intervention_evidence(subset)
             supported = {

@@ -163,7 +163,14 @@ def evaluate_full_discovery(
         lag_supports = [edge.lag_support for edge in graph if np.isfinite(edge.lag_support)]
         lag_stds = [edge.lag_std for edge in graph if np.isfinite(edge.lag_std)]
         candidate_count = candidate_count_for_method(method, representation)
-        qualification_rate = temporal_qualification_rate(len(graph), candidate_count)
+        if method == "llm_semantic_proposal":
+            qualification_rate = float("nan")
+            temporal_metric_reason = "not_temporally_qualified"
+        else:
+            qualification_rate = temporal_qualification_rate(
+                len(graph), candidate_count
+            )
+            temporal_metric_reason = "temporally_qualified"
         rows.append(
             {
                 "evaluation_track": "full_discovery",
@@ -173,6 +180,7 @@ def evaluate_full_discovery(
                 "candidate_edge_count": candidate_count,
                 "retained_edge_count": len(graph),
                 "temporal_qualification_rate": qualification_rate,
+                "temporal_metric_reason": temporal_metric_reason,
                 "stability": float(np.mean(supports)) if supports else float("nan"),
                 "lag_support": float(np.mean(lag_supports)) if lag_supports else float("nan"),
                 "lag_std": float(np.mean(lag_stds)) if lag_stds else float("nan"),

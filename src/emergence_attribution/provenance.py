@@ -105,11 +105,8 @@ class RunManager:
         resume: bool,
         output_family: str = "runs",
     ) -> "RunManager":
-        forbidden = "ca" + "mo"
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", run_id):
             raise RunContractError("run id contains unsupported characters")
-        if forbidden in run_id.lower():
-            raise RunContractError("run id contains a prohibited historical project name")
         if output_family not in {"runs", "dev_runs", "smoke_runs"}:
             raise RunContractError("unsupported run output family")
         if bool(config.get("formal_run", True)) and output_family != "runs":

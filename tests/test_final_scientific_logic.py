@@ -15,6 +15,7 @@ from emergence_attribution.controlled import (
 from emergence_attribution.dsl import expression_fields
 from emergence_attribution.evaluation import (
     candidate_count_for_method,
+    evaluate_full_discovery,
     intervention_classification_rates,
     temporal_qualification_rate,
 )
@@ -224,6 +225,44 @@ def test_primary_attribution_contains_only_full_method(tmp_path: Path) -> None:
     assert set(comparative["method"]) == {"trajectory_vote"}
 
 
+def test_semantic_proposal_has_no_temporal_qualification_rate(
+    tmp_path: Path,
+) -> None:
+    analysis = tmp_path / "analysis"
+    representation_root = tmp_path / "representation"
+    analysis.mkdir()
+    representation_root.mkdir()
+    representation = _path_representation()
+    semantic_edges = [_edge("micro_a", "meso_b"), _edge("meso_b", "macro_c")]
+    write_graph_records(
+        analysis / "main_graphs.jsonl",
+        [
+            {
+                "scenario": "toy",
+                "method": "llm_semantic_proposal",
+                "edges": [edge.__dict__ for edge in semantic_edges],
+            },
+            {
+                "scenario": "toy",
+                "method": "full_method",
+                "edges": [semantic_edges[0].__dict__],
+            },
+        ],
+    )
+    (representation_root / "representation_agreement.json").write_text(
+        json.dumps({"toy": {"computation_signature_jaccard": 1.0}}),
+        encoding="utf-8",
+    )
+
+    result = evaluate_full_discovery(tmp_path, {"toy": representation})
+    proposal = result[result["method"] == "llm_semantic_proposal"].iloc[0]
+    qualified = result[result["method"] == "full_method"].iloc[0]
+    assert pd.isna(proposal["temporal_qualification_rate"])
+    assert proposal["temporal_metric_reason"] == "not_temporally_qualified"
+    assert qualified["temporal_qualification_rate"] == pytest.approx(0.5)
+    assert qualified["temporal_metric_reason"] == "temporally_qualified"
+
+
 def test_controlled_fdr_is_branch_local() -> None:
     for scenario in ("schelling", "deffuant"):
         branches = {
@@ -301,8 +340,8 @@ def test_figure7_filters_incomplete_or_unordered_paths() -> None:
             })
     timing = pd.DataFrame(rows)
     classifications = pd.DataFrame([
-        {"scenario": "toy", "method": "full_method", "parameter": "theta", "direction": "plus", "source": "micro_a", "target": "meso_b", "primary_class": "supported"},
-        {"scenario": "toy", "method": "full_method", "parameter": "theta", "direction": "plus", "source": "meso_b", "target": "macro_c", "primary_class": "supported"},
+        {"scenario": "toy", "method": "full_method", "parameter": "theta", "direction": "plus", "root_source": "micro_a", "source": "micro_a", "target": "meso_b", "primary_class": "supported"},
+        {"scenario": "toy", "method": "full_method", "parameter": "theta", "direction": "plus", "root_source": "micro_a", "source": "meso_b", "target": "macro_c", "primary_class": "supported"},
     ])
     assert eligible_propagation_path_ids(timing, classifications) == {"valid"}
 
@@ -320,17 +359,20 @@ def test_propagation_path_cannot_borrow_support_from_another_direction() -> None
     classifications = pd.DataFrame([
         {
             "scenario": "toy", "method": "full_method", "parameter": "theta",
-            "direction": "plus", "source": "micro_a", "target": "meso_b",
+            "direction": "plus", "root_source": "micro_a",
+            "source": "micro_a", "target": "meso_b",
             "primary_class": "supported",
         },
         {
             "scenario": "toy", "method": "full_method", "parameter": "theta",
-            "direction": "plus", "source": "meso_b", "target": "macro_c",
+            "direction": "plus", "root_source": "micro_a",
+            "source": "meso_b", "target": "macro_c",
             "primary_class": "manipulation_failure",
         },
         {
             "scenario": "toy", "method": "full_method", "parameter": "theta",
-            "direction": "minus", "source": "meso_b", "target": "macro_c",
+            "direction": "minus", "root_source": "micro_a",
+            "source": "meso_b", "target": "macro_c",
             "primary_class": "supported",
         },
     ])
@@ -338,6 +380,43 @@ def test_propagation_path_cannot_borrow_support_from_another_direction() -> None
     classifications.loc[
         classifications["direction"] == "plus", "primary_class"
     ] = "supported"
+    assert eligible_propagation_path_ids(timing, classifications) == {
+        "theta:plus:path"
+    }
+
+
+def test_propagation_path_cannot_borrow_support_from_another_root() -> None:
+    timing = pd.DataFrame([
+        {
+            "scenario": "toy", "path_id": "theta:plus:path", "parameter": "theta",
+            "direction": "plus", "source": "micro_a", "meso": "meso_b",
+            "macro": "macro_c", "scale": scale, "onset_time": onset,
+            "significant": True, "cumulative_effect": 0.5,
+        }
+        for scale, onset in (("micro", 1), ("meso", 2), ("macro", 3))
+    ])
+    classifications = pd.DataFrame([
+        {
+            "scenario": "toy", "method": "full_method", "parameter": "theta",
+            "direction": "plus", "root_source": "micro_a",
+            "source": "micro_a", "target": "meso_b",
+            "primary_class": "supported",
+        },
+        {
+            "scenario": "toy", "method": "full_method", "parameter": "theta",
+            "direction": "plus", "root_source": "micro_d",
+            "source": "meso_b", "target": "macro_c",
+            "primary_class": "supported",
+        },
+    ])
+
+    assert eligible_propagation_path_ids(timing, classifications) == set()
+    classifications.loc[len(classifications)] = {
+        "scenario": "toy", "method": "full_method", "parameter": "theta",
+        "direction": "plus", "root_source": "micro_a",
+        "source": "meso_b", "target": "macro_c",
+        "primary_class": "supported",
+    }
     assert eligible_propagation_path_ids(timing, classifications) == {
         "theta:plus:path"
     }

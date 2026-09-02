@@ -20,6 +20,7 @@ from emergence_attribution.reference_truth import (
     reference_relations,
 )
 from emergence_attribution.rendering import figure_4
+from emergence_attribution import robustness
 from emergence_attribution.robustness import (
     _corrupt_candidates_and_frames,
     _execute_robustness_bootstrap_jobs,
@@ -150,6 +151,42 @@ def test_representation_robustness_qualification_denominator_is_actual() -> None
         candidate_count_override=len(candidates),
     )
     assert metrics["temporal_qualification_rate"] == pytest.approx(1 / len(candidates))
+
+
+def test_mechanism_checks_do_not_export_hidden_reference_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "analysis").mkdir()
+    monkeypatch.setattr(
+        robustness,
+        "trajectories",
+        lambda *_args, **_kwargs: {1: pd.DataFrame({"placeholder": [0.0]})},
+    )
+    monkeypatch.setattr(
+        robustness, "prepare_target_blocks", lambda *_args, **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        robustness,
+        "discover_point_graph_from_blocks",
+        lambda *_args, **_kwargs: [],
+    )
+    config = {
+        "temporal": {"maximum_lag": 1, "parent_alpha": 0.1, "fdr_alpha": 0.05},
+        "scenarios": {
+            "schelling": {"mechanism_variant": "disable_homophilic_relocation"}
+        },
+    }
+
+    result = robustness.run_mechanism_checks(
+        config,
+        tmp_path,
+        {"schelling": mock_generation("schelling")["representation"]},
+        pd.DataFrame(),
+    )
+
+    saved = pd.read_csv(tmp_path / "analysis" / "mechanism_disabled_checks.csv")
+    assert "targeted_reference_edges" not in result.columns
+    assert "targeted_reference_edges" not in saved.columns
 
 
 def test_data_efficiency_n1_stability_is_not_estimable(
