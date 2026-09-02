@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from .dsl import compute_indicator
+from .primary_freeze import verify_primary_contract
 from .raw_schemas import raw_schema
 from .raw_schemas import HIDDEN_REFERENCE_FIELD_NAMES
 from .simulators import run_scenario_with_hidden
@@ -27,8 +28,17 @@ METADATA_COLUMNS = {
     "intervention_parameter",
     "intervention_direction",
     "mechanism_variant",
+    "evaluation_track",
+    "data_partition",
+    "phase",
+    "dose_label",
     "time",
 }
+
+
+PRIMARY_PARTITION = "primary"
+HOLDOUT_PARTITION = "holdout"
+DATA_PARTITIONS = {PRIMARY_PARTITION, HOLDOUT_PARTITION}
 
 
 def sha256_file(path: Path) -> str:
@@ -59,6 +69,9 @@ class SimulationTask:
     hidden_path: str
     phase: str
     formal_run: bool
+    evaluation_track: str = "primary_discovery"
+    data_partition: str = PRIMARY_PARTITION
+    dose_label: str = "baseline"
 
 
 @dataclass(frozen=True)
@@ -79,28 +92,99 @@ def build_simulation_tasks(
     hidden_root: Path | None = None,
     *,
     phase: str = "all",
+    dataset_partition: str | None = None,
 ) -> list[SimulationTask]:
+    """Build a deterministic, non-overlapping simulation matrix.
+
+    ``dataset_partition=None`` preserves the pre-final API: it uses
+    ``random_seeds`` and only the canonical minus/plus interventions.  Final
+    protocol callers must select ``primary`` or ``holdout`` explicitly.  The
+    primary partition adds the two pre-specified in-range intermediate doses;
+    the holdout partition uses an independent seed pool and canonical
+    minus/plus conditions only.
+    """
     if phase not in {"baseline", "intervention", "all"}:
         raise ValueError(f"unknown simulation phase: {phase}")
+    if dataset_partition is not None and dataset_partition not in DATA_PARTITIONS:
+        raise ValueError(f"unknown simulation dataset partition: {dataset_partition}")
+    primary_seeds = tuple(int(seed) for seed in config["random_seeds"])
+    confirmation_seeds = tuple(int(seed) for seed in config.get("confirmation_seeds", ()))
+    overlap = sorted(set(primary_seeds) & set(confirmation_seeds))
+    if overlap:
+        raise ValueError(f"primary and holdout seed pools overlap: {overlap}")
+    if dataset_partition == HOLDOUT_PARTITION:
+        if not confirmation_seeds:
+            raise ValueError("holdout simulation requires confirmation_seeds")
+        seeds = confirmation_seeds
+    else:
+        seeds = primary_seeds
+    use_intermediate_doses = bool(
+        dataset_partition == PRIMARY_PARTITION
+        and config.get("dose_response", {}).get("enabled", False)
+    )
     hidden_root = hidden_root or raw_root.parent / "reference_hidden"
     tasks: list[SimulationTask] = []
     for scenario, spec in sorted(config["scenarios"].items()):
         baseline = {name: float(value) for name, value in spec["baseline"].items()}
-        conditions: list[tuple[str, str, str, str, dict[str, float]]] = []
+        conditions: list[
+            tuple[str, str, str, str, dict[str, float], str, str]
+        ] = []
         if phase in {"baseline", "all"}:
-            conditions.append(("baseline", "", "baseline", "baseline", baseline))
+            baseline_track = (
+                "holdout_confirmation"
+                if dataset_partition == HOLDOUT_PARTITION
+                else "primary_discovery"
+            )
+            conditions.append(
+                ("baseline", "", "baseline", "baseline", baseline, baseline_track, "baseline")
+            )
         if phase in {"intervention", "all"}:
-            intervention_conditions: list[tuple[str, str, str, str, dict[str, float]]] = []
+            intervention_conditions: list[
+                tuple[str, str, str, str, dict[str, float], str, str]
+            ] = []
         else:
             intervention_conditions = []
         for parameter, levels in sorted(spec["interventions"].items()):
-            for direction, value in (("minus", levels[0]), ("plus", levels[2])):
+            if len(levels) != 3:
+                raise ValueError(
+                    f"{scenario}:{parameter} must define [minus, baseline, plus]"
+                )
+            if not np.isclose(float(levels[1]), baseline[parameter]):
+                raise ValueError(
+                    f"{scenario}:{parameter} intervention centre differs from baseline"
+                )
+            dose_values: list[tuple[str, float]] = [
+                ("minus", float(levels[0])),
+                ("plus", float(levels[2])),
+            ]
+            if use_intermediate_doses:
+                dose_values = [
+                    ("minus", float(levels[0])),
+                    ("mid_minus", (float(levels[0]) + float(levels[1])) / 2.0),
+                    ("mid_plus", (float(levels[1]) + float(levels[2])) / 2.0),
+                    ("plus", float(levels[2])),
+                ]
+            for direction, value in dose_values:
                 revised = dict(baseline)
                 revised[parameter] = float(value)
+                if dataset_partition == HOLDOUT_PARTITION:
+                    evaluation_track = "holdout_confirmation"
+                elif direction in {"mid_minus", "mid_plus"}:
+                    evaluation_track = "dose_response"
+                else:
+                    evaluation_track = "primary_discovery"
                 intervention_conditions.append(
-                    (f"{parameter}_{direction}", parameter, direction, "baseline", revised)
+                    (
+                        f"{parameter}_{direction}", parameter, direction,
+                        "baseline", revised, evaluation_track, direction,
+                    )
                 )
         if phase in {"intervention", "all"}:
+            mechanism_track = (
+                "holdout_confirmation"
+                if dataset_partition == HOLDOUT_PARTITION
+                else "falsification_control"
+            )
             intervention_conditions.append(
                 (
                     "mechanism_disabled",
@@ -108,16 +192,26 @@ def build_simulation_tasks(
                     "disabled",
                     str(spec["mechanism_variant"]),
                     baseline,
+                    mechanism_track,
+                    "mechanism_disabled",
                 )
             )
             conditions.extend(intervention_conditions)
-        for condition, parameter, direction, mechanism, parameters in conditions:
-            for seed in config["random_seeds"]:
+        for (
+            condition, parameter, direction, mechanism, parameters,
+            evaluation_track, dose_label,
+        ) in conditions:
+            for seed in seeds:
                 raw_path = raw_root / scenario / condition / f"seed_{int(seed)}.npz"
                 hidden_path = hidden_root / scenario / condition / f"seed_{int(seed)}.npz"
+                partition_label = dataset_partition or "legacy"
                 tasks.append(
                     SimulationTask(
-                        task_id=f"{scenario}:{condition}:{int(seed)}",
+                        task_id=(
+                            f"{partition_label}:{scenario}:{condition}:{int(seed)}"
+                            if dataset_partition is not None
+                            else f"{scenario}:{condition}:{int(seed)}"
+                        ),
                         scenario=scenario,
                         seed=int(seed),
                         condition=condition,
@@ -130,6 +224,9 @@ def build_simulation_tasks(
                         hidden_path=str(hidden_path),
                         phase="baseline" if condition == "baseline" else "intervention",
                         formal_run=bool(config.get("formal_run", False)),
+                        evaluation_track=evaluation_track,
+                        data_partition=partition_label,
+                        dose_label=dose_label,
                     )
                 )
     return sorted(tasks, key=lambda item: item.task_id)
@@ -245,17 +342,30 @@ def run_simulation_stage(
     progress_callback: Callable[[str, int, int, str], None] | None = None,
     *,
     phase: str = "all",
+    dataset_partition: str = PRIMARY_PARTITION,
 ) -> dict[str, Any]:
+    if dataset_partition not in DATA_PARTITIONS:
+        raise ValueError(f"unknown simulation dataset partition: {dataset_partition}")
+    if dataset_partition == HOLDOUT_PARTITION:
+        _require_primary_freeze(run_root)
     data_root = run_root / "data"
-    raw_root = data_root / "raw_logs"
-    hidden_root = data_root / "reference_hidden"
+    partition_root = data_root / dataset_partition
+    raw_root = partition_root / "raw_logs"
+    hidden_root = partition_root / "reference_hidden"
     tasks = build_simulation_tasks(
-        config, raw_root, hidden_root, phase=phase
+        config, raw_root, hidden_root, phase=phase,
+        dataset_partition=dataset_partition,
     )
 
     def update(completed: int, total: int, result: SimulationTaskResult) -> None:
         if progress_callback:
-            progress_callback(f"{phase.title()} simulation", completed, total, result.task_id)
+            label = {
+                (PRIMARY_PARTITION, "baseline"): "Primary baseline",
+                (PRIMARY_PARTITION, "intervention"): "Primary dose interventions",
+                (HOLDOUT_PARTITION, "baseline"): "Holdout baseline",
+                (HOLDOUT_PARTITION, "intervention"): "Holdout interventions",
+            }[(dataset_partition, phase)]
+            progress_callback(label, completed, total, result.task_id)
 
     results = _run_jobs(execute_simulation_task, tasks, workers, update)
     failures = [item for item in results if item.status == "failed"]
@@ -279,12 +389,20 @@ def run_simulation_stage(
         )
         task_records.append(record)
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "phase": phase,
+        "data_partition": dataset_partition,
+        "evaluation_tracks": sorted({task.evaluation_track for task in tasks}),
         "simulation_contract_sha256": sha256_json(
             {
-                "random_seeds": config["random_seeds"],
+                "data_partition": dataset_partition,
+                "seeds": (
+                    config["random_seeds"]
+                    if dataset_partition == PRIMARY_PARTITION
+                    else config["confirmation_seeds"]
+                ),
                 "scenarios": config["scenarios"],
+                "dose_response": config.get("dose_response", {}),
             }
         ),
         "requested_tasks": len(tasks),
@@ -293,9 +411,17 @@ def run_simulation_stage(
         "pairing": "same initial state and counter-based random streams by scenario and seed",
         "task_records": task_records,
     }
-    data_root.mkdir(parents=True, exist_ok=True)
-    manifest_path = data_root / f"{phase}_simulation_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    partition_root.mkdir(parents=True, exist_ok=True)
+    manifest_text = json.dumps(manifest, indent=2, ensure_ascii=False)
+    manifest_path = partition_root / f"{phase}_simulation_manifest.json"
+    manifest_path.write_text(manifest_text, encoding="utf-8")
+    # Primary aliases keep pre-final readers functional while every payload is
+    # physically isolated under data/primary.  Holdout never receives aliases,
+    # so it cannot be mistaken for discovery input.
+    if dataset_partition == PRIMARY_PARTITION:
+        (data_root / f"{phase}_simulation_manifest.json").write_text(
+            manifest_text, encoding="utf-8"
+        )
     if failures:
         raise RuntimeError(
             f"{len(failures)} simulation tasks failed; inspect {manifest_path} and resume after correcting the environment"
@@ -308,7 +434,8 @@ def run_baseline_simulation_stage(
     progress_callback: Callable[[str, int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     return run_simulation_stage(
-        config, run_root, workers, progress_callback, phase="baseline"
+        config, run_root, workers, progress_callback, phase="baseline",
+        dataset_partition=PRIMARY_PARTITION,
     )
 
 
@@ -317,13 +444,52 @@ def run_intervention_simulation_stage(
     progress_callback: Callable[[str, int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     return run_simulation_stage(
-        config, run_root, workers, progress_callback, phase="intervention"
+        config, run_root, workers, progress_callback, phase="intervention",
+        dataset_partition=PRIMARY_PARTITION,
     )
 
 
-def verify_simulation_manifest(run_root: Path, phase: str = "all") -> None:
-    manifest_path = run_root / "data" / f"{phase}_simulation_manifest.json"
+def _require_primary_freeze(run_root: Path) -> None:
+    """Fail closed until the primary prospective stage is frozen."""
+    verify_primary_contract(run_root)
+
+
+def run_holdout_baseline_simulation_stage(
+    config: dict[str, Any], run_root: Path, workers: int,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    return run_simulation_stage(
+        config, run_root, workers, progress_callback, phase="baseline",
+        dataset_partition=HOLDOUT_PARTITION,
+    )
+
+
+def run_holdout_intervention_simulation_stage(
+    config: dict[str, Any], run_root: Path, workers: int,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    return run_simulation_stage(
+        config, run_root, workers, progress_callback, phase="intervention",
+        dataset_partition=HOLDOUT_PARTITION,
+    )
+
+
+def verify_simulation_manifest(
+    run_root: Path,
+    phase: str = "all",
+    *,
+    dataset_partition: str = PRIMARY_PARTITION,
+) -> None:
+    if dataset_partition not in DATA_PARTITIONS:
+        raise ValueError(f"unknown simulation dataset partition: {dataset_partition}")
+    manifest_path = (
+        run_root / "data" / dataset_partition / f"{phase}_simulation_manifest.json"
+    )
+    if not manifest_path.is_file() and dataset_partition == PRIMARY_PARTITION:
+        manifest_path = run_root / "data" / f"{phase}_simulation_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("data_partition", dataset_partition) != dataset_partition:
+        raise RuntimeError("simulation manifest belongs to another data partition")
     errors = []
     for record in manifest["task_records"]:
         path = run_root / record["raw_path"]
@@ -350,6 +516,10 @@ class IndicatorCompilationTask:
     mechanism_variant: str
     raw_path: str
     indicators: list[dict[str, Any]]
+    evaluation_track: str = "primary_discovery"
+    data_partition: str = PRIMARY_PARTITION
+    phase: str = "baseline"
+    dose_label: str = "baseline"
 
 
 def compile_indicator_task(task: IndicatorCompilationTask) -> list[dict[str, Any]]:
@@ -380,6 +550,10 @@ def compile_indicator_task(task: IndicatorCompilationTask) -> list[dict[str, Any
             "intervention_parameter": task.intervention_parameter,
             "intervention_direction": task.intervention_direction,
             "mechanism_variant": task.mechanism_variant,
+            "evaluation_track": task.evaluation_track,
+            "data_partition": task.data_partition,
+            "phase": task.phase,
+            "dose_label": task.dose_label,
             "time": time_index,
         }
         record.update({name: float(series[time_index]) for name, series in values.items()})
@@ -394,12 +568,21 @@ def compile_indicator_dataset(
     workers: int,
     *,
     complete: bool,
+    dataset_partition: str = PRIMARY_PARTITION,
     output_stem: str | None = None,
     progress_callback: Callable[[str, int, int, str], None] | None = None,
 ) -> pd.DataFrame:
+    if dataset_partition not in DATA_PARTITIONS:
+        raise ValueError(f"unknown simulation dataset partition: {dataset_partition}")
+    if dataset_partition == HOLDOUT_PARTITION:
+        _require_primary_freeze(run_root)
     data_root = run_root / "data"
     kind = "complete" if complete else "baseline"
-    stem = output_stem or f"indicator_trajectories_{kind}"
+    stem = output_stem or (
+        f"indicator_trajectories_{kind}"
+        if dataset_partition == PRIMARY_PARTITION
+        else f"holdout_indicator_trajectories_{kind}"
+    )
     output_path = data_root / f"{stem}.parquet"
     manifest_path = data_root / f"{stem}.manifest.json"
     representation_hash = sha256_json(representations)
@@ -407,6 +590,8 @@ def compile_indicator_dataset(
         raise RuntimeError("saved indicator dataset checkpoint is incomplete")
     if output_path.exists() and manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("data_partition", dataset_partition) != dataset_partition:
+            raise RuntimeError("saved indicator dataset belongs to another data partition")
         if manifest.get("representation_sha256") != representation_hash:
             raise RuntimeError("saved indicator dataset belongs to another representation")
         if manifest.get("sha256") != sha256_file(output_path):
@@ -415,14 +600,22 @@ def compile_indicator_dataset(
     phases = ["baseline", "intervention"] if complete else ["baseline"]
     records: list[dict[str, Any]] = []
     for phase in phases:
-        phase_path = data_root / f"{phase}_simulation_manifest.json"
+        phase_path = (
+            data_root / dataset_partition / f"{phase}_simulation_manifest.json"
+        )
         if not phase_path.exists():
+            primary_alias = data_root / f"{phase}_simulation_manifest.json"
             legacy = data_root / "all_simulation_manifest.json"
-            if legacy.exists():
+            if dataset_partition == PRIMARY_PARTITION and primary_alias.exists():
+                phase_path = primary_alias
+            if not phase_path.exists() and legacy.exists():
                 phase_path = legacy
-            else:
+            elif not phase_path.exists():
                 raise FileNotFoundError(f"missing simulation phase manifest: {phase_path}")
-        phase_records = json.loads(phase_path.read_text(encoding="utf-8"))["task_records"]
+        phase_manifest = json.loads(phase_path.read_text(encoding="utf-8"))
+        if phase_manifest.get("data_partition", dataset_partition) != dataset_partition:
+            raise RuntimeError("indicator compiler received another data partition")
+        phase_records = phase_manifest["task_records"]
         if phase == "baseline":
             phase_records = [item for item in phase_records if item["condition"] == "baseline"]
         elif phase_path.name == "all_simulation_manifest.json":
@@ -438,6 +631,12 @@ def compile_indicator_dataset(
             mechanism_variant=item["mechanism_variant"],
             raw_path=str(run_root / item["raw_path"]),
             indicators=representations[item["scenario"]]["indicators"],
+            evaluation_track=item.get("evaluation_track", "primary_discovery"),
+            data_partition=item.get("data_partition", dataset_partition),
+            phase=item.get(
+                "phase", "baseline" if item["condition"] == "baseline" else "intervention"
+            ),
+            dose_label=item.get("dose_label", item["intervention_direction"]),
         )
         for item in records
     ]
@@ -449,7 +648,8 @@ def compile_indicator_dataset(
     compiled = _run_jobs(compile_indicator_task, tasks, workers, update)
     flat = [record for task_records in compiled for record in task_records]
     frame = pd.DataFrame(flat).sort_values(
-        ["scenario", "condition", "seed", "time"], ignore_index=True
+        ["data_partition", "scenario", "condition", "seed", "time"],
+        ignore_index=True,
     )
     temporary = output_path.with_suffix(".tmp.parquet")
     frame.to_parquet(temporary, index=False)
@@ -457,6 +657,7 @@ def compile_indicator_dataset(
     manifest = {
         "schema_version": "1.0",
         "kind": kind,
+        "data_partition": dataset_partition,
         "representation_sha256": representation_hash,
         "row_count": len(frame),
         "columns": list(frame.columns),

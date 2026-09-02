@@ -14,16 +14,24 @@ from pydantic import ValidationError
 
 from .dsl import (
     DSLValidationError,
+    ELEMENTARY_OR_LOCAL_OPERATORS,
+    GENUINE_MESO_OPERATORS,
+    GLOBAL_STRUCTURE_OPERATORS,
+    TRIVIAL_WRAPPERS,
     computation_signature,
     expression_fields,
+    expression_primitive_families,
+    global_structure_operators,
     grammar_description,
+    is_genuine_meso_expression,
+    is_trivial_micro_macro_lineage,
     is_trivial_cross_scale_transform,
-    mesoscopic_structure_operators,
     validate_indicator_expression,
     validate_temporal_aggregation,
 )
 from .llm_client import LLMResponse, OpenAICompatibleClient, load_llm_config
 from .raw_schemas import prompt_scenario_contract, raw_schema
+from .replication import write_replication_agreement
 from .schemas import SemanticGeneration
 
 
@@ -202,14 +210,35 @@ def build_prompt(
         ),
         "meso": (
             "The scientific object is an actual subset, neighborhood, district, "
-            "community, cluster, or local domain. A Meso computation must use a "
-            "group, district, neighborhood, or network-structure operator."
+            "community, cluster, or local domain. A Meso computation must quantify "
+            "organization across those entities through heterogeneity, separation, "
+            "a quantile range, within-entity structure, or an explicit local contrast. "
+            "A group/neighborhood mean followed only by outer mean or sum is not Meso."
         ),
         "macro": (
             "The scientific object is the whole-system collective state or outcome "
             "and entity_scope must be whole_system."
         ),
     }
+    contract["operator_scope_contract"] = {
+        "elementary_or_local_operators": sorted(ELEMENTARY_OR_LOCAL_OPERATORS),
+        "genuine_meso_primitives": sorted(GENUINE_MESO_OPERATORS),
+        "global_structure_operators": sorted(GLOBAL_STRUCTURE_OPERATORS),
+        "trivial_wrappers": sorted(TRIVIAL_WRAPPERS),
+        "global_rule": (
+            "An inherently whole-grid or whole-network operator that directly "
+            "returns one scalar per time step is valid only in a Macro computation, "
+            "never as Micro and never as sufficient Meso structure."
+        ),
+    }
+    contract["public_source_family_rule"] = (
+        "raw_field_schema primitive_family and statistic_role are public semantic "
+        "metadata for recognizing aliases such as an elementary event and its logged "
+        "aggregate count. They contain no hidden mechanism truth. A complete "
+        "Micro-to-Meso-to-Macro path is invalid when its Macro is only the same "
+        "primitive statistic as its Micro under rolling, differencing, normalization, "
+        "constant affine transformation, or equivalent count/fraction form."
+    )
     contract["trivial_cross_scale_rule"] = (
         "A cross-scale candidate edge is invalid when source and target have the "
         "same canonical computation after stripping identity, rolling window, "
@@ -249,6 +278,30 @@ def _complete_paths(value: SemanticGeneration) -> dict[str, int]:
                 branch = lookup[left.source].branch_id
                 counts[branch] = counts.get(branch, 0) + 1
     return counts
+
+
+def _complete_path_triples(
+    value: SemanticGeneration,
+) -> list[tuple[str, str, str]]:
+    lookup = {item.id: item for item in value.representation.indicators}
+    first = [
+        edge
+        for edge in value.representation.candidate_edges
+        if lookup[edge.source].scale == "micro" and lookup[edge.target].scale == "meso"
+    ]
+    second = [
+        edge
+        for edge in value.representation.candidate_edges
+        if lookup[edge.source].scale == "meso" and lookup[edge.target].scale == "macro"
+    ]
+    return sorted(
+        {
+            (left.source, left.target, right.target)
+            for left in first
+            for right in second
+            if left.target == right.source
+        }
+    )
 
 
 def validate_generation(
@@ -295,6 +348,7 @@ def validate_generation(
         str(item["field_name"]): str(item.get("entity_level", ""))
         for item in schema
     }
+    source_family_by_indicator: dict[str, list[str]] = {}
     for indicator in representation.indicators:
         try:
             validate_indicator_expression(indicator.computation, schema)
@@ -307,6 +361,9 @@ def validate_generation(
         except DSLValidationError as exc:
             errors.append(f"indicator {indicator.id}: {exc}")
         actual_fields = expression_fields(indicator.computation)
+        source_family_by_indicator[indicator.id] = sorted(
+            expression_primitive_families(indicator.computation, schema)
+        )
         if actual_fields != set(indicator.source_fields):
             errors.append(
                 f"indicator {indicator.id}: source_fields must exactly match AST fields {sorted(actual_fields)}"
@@ -326,12 +383,19 @@ def validate_generation(
                     f"indicator {indicator.id}: Micro computation must derive from "
                     "an agent, interaction, elementary event, cell, or edge primitive"
                 )
-        if indicator.scale == "meso" and not mesoscopic_structure_operators(
+        global_ops = sorted(global_structure_operators(indicator.computation))
+        if indicator.scale in {"micro", "meso"} and global_ops:
+            errors.append(
+                f"indicator {indicator.id}: global_structure_operator_invalid_for_"
+                f"{indicator.scale}: {global_ops}"
+            )
+        if indicator.scale == "meso" and not is_genuine_meso_expression(
             indicator.computation
         ):
             errors.append(
-                f"indicator {indicator.id}: Meso requires a group, district, "
-                "neighborhood, community, cluster, or network structural operation"
+                f"indicator {indicator.id}: Meso requires genuine organization "
+                "across groups, districts, neighborhoods, communities, clusters, "
+                "or local domains; a pure outer mean/sum is insufficient"
             )
     parameter_names = set(scenario_spec["interventions"])
     proposed_parameters: set[str] = set()
@@ -373,6 +437,23 @@ def validate_generation(
             errors.append(
                 f"candidate edge {edge.source}->{edge.target}: "
                 "trivial_cross_scale_transform"
+            )
+    trivial_micro_macro_paths: list[tuple[str, str, str]] = []
+    for micro_id, meso_id, macro_id in _complete_path_triples(value):
+        micro = indicator_lookup[micro_id]
+        macro = indicator_lookup[macro_id]
+        if is_trivial_micro_macro_lineage(
+            micro.computation,
+            micro.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+            macro.computation,
+            macro.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+            schema,
+        ):
+            path = (micro_id, meso_id, macro_id)
+            trivial_micro_macro_paths.append(path)
+            errors.append(
+                f"candidate path {micro_id}->{meso_id}->{macro_id}: "
+                "trivial_micro_macro_lineage"
             )
     incoming = {item.id: 0 for item in representation.indicators}
     outgoing = {item.id: 0 for item in representation.indicators}
@@ -475,6 +556,8 @@ def validate_generation(
         "indicator_count": len(representation.indicators),
         "candidate_edge_count": len(representation.candidate_edges),
         "trivial_cross_scale_edge_count": len(trivial_edges),
+        "trivial_micro_macro_lineage_count": len(trivial_micro_macro_paths),
+        "source_families": source_family_by_indicator,
         "direct_micro_parameter_sources": {
             name: sorted(sources) for name, sources in direct_micro_sources.items()
         },
@@ -674,40 +757,79 @@ def run_semantic_stage(
     prompt_template = prompt_template_path.read_text(encoding="utf-8")
     output_root = run_root / "llm"
     output_root.mkdir(parents=True, exist_ok=True)
-    jobs = [
-        (scenario, index)
-        for scenario in experiment_config["scenarios"]
-        for index in range(int(experiment_config["representation"]["independent_generations"]))
-    ]
+    selection_generation_count = int(
+        experiment_config.get("semantic_replication", {}).get(
+            "selection_generations",
+            experiment_config["representation"]["independent_generations"],
+        )
+    )
+    replication_generation_count = int(
+        experiment_config.get("semantic_replication", {}).get(
+            "replication_only_generations", 0
+        )
+    )
+    if selection_generation_count != int(
+        experiment_config["representation"]["independent_generations"]
+    ):
+        raise ValueError(
+            "semantic selection_generations must match representation independent_generations"
+        )
     results: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs)))) as pool:
-        futures = {
-            pool.submit(
-                run_generation,
-                scenario,
-                index,
-                experiment_config,
-                llm_config,
-                prompt_template,
-                output_root,
-                completion_provider(scenario, index) if completion_provider else None,
-            ): (scenario, index)
-            for scenario, index in jobs
-        }
-        for future in as_completed(futures):
-            results.append(future.result())
-            if progress_callback:
-                progress_callback("LLM generation", len(results), len(jobs))
+
+    def run_generation_wave(indices: range, label: str) -> None:
+        jobs = [
+            (scenario, index)
+            for scenario in experiment_config["scenarios"]
+            for index in indices
+        ]
+        if not jobs:
+            return
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs)))) as pool:
+            futures = {
+                pool.submit(
+                    run_generation,
+                    scenario,
+                    index,
+                    experiment_config,
+                    llm_config,
+                    prompt_template,
+                    output_root,
+                    completion_provider(scenario, index) if completion_provider else None,
+                ): (scenario, index)
+                for scenario, index in jobs
+            }
+            for future in as_completed(futures):
+                results.append(future.result())
+                completed += 1
+                if progress_callback:
+                    progress_callback(label, completed, len(jobs))
+
+    run_generation_wave(
+        range(selection_generation_count), "Semantic selection generations"
+    )
+    run_generation_wave(
+        range(
+            selection_generation_count,
+            selection_generation_count + replication_generation_count,
+        ),
+        "Semantic replication generations",
+    )
     representation_root = run_root / "representation"
     representation_root.mkdir(parents=True, exist_ok=True)
     validation_bundle: dict[str, Any] = {}
     agreement_bundle: dict[str, Any] = {}
     predictions_bundle: dict[str, Any] = {"schema_version": "1.0", "scenarios": {}}
     for scenario in experiment_config["scenarios"]:
-        accepted = [
+        accepted_all = [
             item
             for item in results
             if item["scenario"] == scenario and item["status"] == "accepted"
+        ]
+        accepted = [
+            item
+            for item in accepted_all
+            if int(item["generation"]) < selection_generation_count
         ]
         if not accepted:
             raise RuntimeError(f"no valid formal semantic generation for {scenario}")
@@ -723,12 +845,28 @@ def run_semantic_stage(
             "selected_generation": selected["generation"],
             "selection_rule": experiment_config["representation"]["selection_rule"],
             "selection_key": list(_selection_key(selected)),
-            "selection_reason": "selected without simulation statistics or evaluation outcomes",
+            "selection_reason": (
+                "selected only from generation indices below selection_generation_count, "
+                "without simulation statistics or evaluation outcomes; replication-only "
+                "generations were categorically ineligible"
+            ),
             "representation_sha256": hashlib.sha256(representation_path.read_bytes()).hexdigest(),
             "accepted_generation_count": len(accepted),
+            "selection_eligible_accepted_generation_count": len(accepted),
+            "replication_only_accepted_generation_count": len(accepted_all) - len(accepted),
+            "selection_generation_count": selection_generation_count,
+            "replication_only_generation_count": replication_generation_count,
             "all_generations": [
                 {
                     "generation": item["generation"],
+                    "generation_role": (
+                        "selection_eligible"
+                        if int(item["generation"]) < selection_generation_count
+                        else "replication_only"
+                    ),
+                    "selection_eligible": bool(
+                        int(item["generation"]) < selection_generation_count
+                    ),
                     "status": item["status"],
                     "repair_rounds": item["repair_rounds"],
                     "validation": item["validation"],
@@ -740,6 +878,12 @@ def run_semantic_stage(
             ],
         }
         agreement_bundle[scenario] = _agreement(accepted)
+    write_replication_agreement(
+        run_root,
+        results,
+        list(experiment_config["scenarios"]),
+        selection_generation_count,
+    )
     predictions_path = representation_root / "prospective_predictions.json"
     predictions_path.write_text(
         json.dumps(predictions_bundle, indent=2, ensure_ascii=False), encoding="utf-8"

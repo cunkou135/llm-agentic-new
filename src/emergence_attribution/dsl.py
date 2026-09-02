@@ -52,14 +52,57 @@ _OPERATORS = {
 } | _REDUCERS | _BINARY | _UNARY | _COMPARISONS
 _OPERATORS.add("correlation")
 
-MESOSCOPIC_STRUCTURE_OPERATORS = frozenset(
+# Scientific-scope classes are deliberately separate from type/shape checking.
+# A scalar [time] output does not by itself establish a scientific scale.
+ELEMENTARY_OR_LOCAL_OPERATORS = frozenset(
+    {
+        "field",
+        "where",
+        "select",
+        "correlation",
+    }
+)
+GENUINE_MESO_OPERATORS = frozenset(
     {
         "group_reduce",
         "network_neighborhood_reduce",
+    }
+)
+GLOBAL_STRUCTURE_OPERATORS = frozenset(
+    {
+        "spatial_neighbor_similarity",
+        "connected_component_count",
+        "largest_component_fraction",
         "network_assortativity",
+        "network_density",
         "network_component_count",
         "network_largest_component_fraction",
     }
+)
+TRIVIAL_WRAPPERS = frozenset(
+    {
+        "time_difference",
+        "rolling_mean",
+        "rolling_std",
+        "negate",
+        "sqrt",
+        "log1p",
+        "clip",
+    }
+)
+
+# Backward-compatible public name.  Whole-system operators are intentionally no
+# longer classified as mesoscopic structure.
+MESOSCOPIC_STRUCTURE_OPERATORS = GENUINE_MESO_OPERATORS
+
+_ORGANIZATION_REDUCERS = frozenset(
+    {"std", "variance", "entropy", "binned_entropy"}
+)
+_NONTRIVIAL_WITHIN_STRUCTURE_REDUCERS = frozenset(
+    {"std", "variance", "entropy"}
+)
+_NORMALIZER_PRIMITIVE_FAMILIES = frozenset(
+    {"population_size", "simulation_length"}
 )
 
 
@@ -284,6 +327,106 @@ def mesoscopic_structure_operators(expression: dict[str, Any]) -> set[str]:
     return expression_operators(expression) & MESOSCOPIC_STRUCTURE_OPERATORS
 
 
+def global_structure_operators(expression: dict[str, Any]) -> set[str]:
+    """Return inherently whole-grid/whole-network operators in an AST."""
+
+    return expression_operators(expression) & GLOBAL_STRUCTURE_OPERATORS
+
+
+def _contains_operator(expression: Any, operators: frozenset[str]) -> bool:
+    if not isinstance(expression, dict):
+        return False
+    if expression.get("op") in operators:
+        return True
+    return any(
+        _contains_operator(value, operators)
+        for value in expression.values()
+        if isinstance(value, dict)
+    )
+
+
+def _is_quantile_range(expression: dict[str, Any]) -> bool:
+    if expression.get("op") not in {"subtract", "distance"}:
+        return False
+    left = expression.get("left")
+    right = expression.get("right")
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    if left.get("op") != "quantile" or right.get("op") != "quantile":
+        return False
+    left_q, right_q = left.get("q"), right.get("q")
+    if not isinstance(left_q, (int, float)) or not isinstance(right_q, (int, float)):
+        return False
+    return (
+        float(left_q) != float(right_q)
+        and _contains_operator(left, GENUINE_MESO_OPERATORS)
+        and _contains_operator(right, GENUINE_MESO_OPERATORS)
+    )
+
+
+def _contains_local_structural_contrast(expression: Any) -> bool:
+    """Detect an explicit entity-versus-neighborhood/group contrast."""
+
+    if not isinstance(expression, dict):
+        return False
+    if expression.get("op") in {"distance", "subtract"}:
+        left = expression.get("left")
+        right = expression.get("right")
+        left_structural = _contains_operator(left, GENUINE_MESO_OPERATORS)
+        right_structural = _contains_operator(right, GENUINE_MESO_OPERATORS)
+        nonstructural = right if left_structural else left
+        if (
+            left_structural != right_structural
+            and _contains_operator(nonstructural, frozenset({"field"}))
+        ):
+            return True
+    return any(
+        _contains_local_structural_contrast(value)
+        for value in expression.values()
+        if isinstance(value, dict)
+    )
+
+
+def is_genuine_meso_expression(expression: dict[str, Any]) -> bool:
+    """Whether an AST measures organization across real intermediate entities.
+
+    A group/neighborhood primitive is necessary but not sufficient.  The final
+    statistic must express between-entity heterogeneity, within-entity
+    heterogeneity, a quantile range, or an explicit local-versus-structural
+    contrast.  Merely averaging/summing group or neighborhood means is rejected.
+    """
+
+    if global_structure_operators(expression):
+        return False
+    if not _contains_operator(expression, GENUINE_MESO_OPERATORS):
+        return False
+    if _is_quantile_range(expression):
+        return True
+    if _contains_local_structural_contrast(expression):
+        return True
+
+    def visit(node: Any) -> bool:
+        if not isinstance(node, dict):
+            return False
+        op = node.get("op")
+        if _is_quantile_range(node):
+            return True
+        if op in _ORGANIZATION_REDUCERS and _contains_operator(
+            node.get("input"), GENUINE_MESO_OPERATORS
+        ):
+            return True
+        if (
+            op in GENUINE_MESO_OPERATORS
+            and node.get("reducer") in _NONTRIVIAL_WITHIN_STRUCTURE_REDUCERS
+        ):
+            return True
+        return any(
+            visit(value) for value in node.values() if isinstance(value, dict)
+        )
+
+    return visit(expression)
+
+
 def _constant_node(value: Any) -> bool:
     return isinstance(value, dict) and value.get("op") == "constant"
 
@@ -294,15 +437,7 @@ def strip_trivial_wrappers(expression: dict[str, Any]) -> dict[str, Any]:
     node = expression
     while isinstance(node, dict):
         op = node.get("op")
-        if op in {
-            "time_difference",
-            "rolling_mean",
-            "rolling_std",
-            "negate",
-            "sqrt",
-            "log1p",
-            "clip",
-        }:
+        if op in TRIVIAL_WRAPPERS:
             node = node.get("input")
             continue
         if op in {"add", "subtract", "multiply", "divide", "safe_ratio"}:
@@ -317,6 +452,152 @@ def strip_trivial_wrappers(expression: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(node, dict):
         return {"op": "invalid_lineage"}
     return node
+
+
+def primitive_family_metadata(
+    schema: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Public raw-field lineage metadata keyed by field name."""
+
+    return {
+        str(item["field_name"]): {
+            "primitive_family": str(item.get("primitive_family", item["field_name"])),
+            "statistic_role": str(item.get("statistic_role", "primitive")),
+        }
+        for item in schema
+    }
+
+
+def expression_primitive_families(
+    expression: dict[str, Any], schema: Iterable[dict[str, Any]]
+) -> set[str]:
+    metadata = primitive_family_metadata(schema)
+    return {
+        metadata[name]["primitive_family"]
+        for name in expression_fields(expression)
+        if name in metadata
+        and metadata[name]["primitive_family"] not in _NORMALIZER_PRIMITIVE_FAMILIES
+    }
+
+
+def _family_lineage_ast(
+    expression: dict[str, Any], metadata: dict[str, dict[str, str]]
+) -> dict[str, Any]:
+    """Replace public field aliases and equivalent count/rate forms canonically."""
+
+    node = strip_trivial_wrappers(expression)
+    op = node.get("op")
+    if op == "field":
+        field = str(node.get("name"))
+        item = metadata.get(
+            field, {"primitive_family": field, "statistic_role": "primitive"}
+        )
+        return {
+            "op": "primitive",
+            "family": item["primitive_family"],
+            "role": item["statistic_role"],
+        }
+    if op == "fraction":
+        nested = node.get("input")
+        if isinstance(nested, dict):
+            nested_ast = _family_lineage_ast(nested, metadata)
+            if (
+                nested_ast.get("op") == "primitive"
+                and nested_ast.get("role")
+                in {"elementary_event", "interaction_event", "binary_state"}
+            ):
+                families = sorted(
+                    family
+                    for family in _family_names_from_ast(nested_ast)
+                    if family not in _NORMALIZER_PRIMITIVE_FAMILIES
+                )
+                if families:
+                    return {"op": "primitive_rate", "families": families}
+    if op in {"divide", "safe_ratio"}:
+        left = node.get("left")
+        right = node.get("right")
+        if isinstance(left, dict) and isinstance(right, dict):
+            left_ast = _family_lineage_ast(left, metadata)
+            right_ast = _family_lineage_ast(right, metadata)
+            left_families = sorted(
+                family
+                for family in _family_names_from_ast(left_ast)
+                if family not in _NORMALIZER_PRIMITIVE_FAMILIES
+            )
+            right_families = _family_names_from_ast(right_ast)
+            left_is_count = (
+                left_ast.get("op") == "primitive"
+                and left_ast.get("role") == "aggregate_count"
+            )
+            if (
+                left_is_count
+                and left_families
+                and right_families
+                and right_families <= _NORMALIZER_PRIMITIVE_FAMILIES
+            ):
+                return {"op": "primitive_rate", "families": left_families}
+    result: dict[str, Any] = {}
+    for key, value in node.items():
+        if isinstance(value, dict):
+            result[key] = _family_lineage_ast(value, metadata)
+        else:
+            result[key] = value
+    return result
+
+
+def _family_names_from_ast(expression: Any) -> set[str]:
+    if not isinstance(expression, dict):
+        return set()
+    families: set[str] = set()
+    family = expression.get("family")
+    if isinstance(family, str):
+        families.add(family)
+    values = expression.get("families")
+    if isinstance(values, list):
+        families.update(str(value) for value in values)
+    for value in expression.values():
+        if isinstance(value, dict):
+            families.update(_family_names_from_ast(value))
+    return families
+
+
+def canonical_source_family_lineage(
+    expression: dict[str, Any],
+    temporal_aggregation: dict[str, Any],
+    schema: Iterable[dict[str, Any]],
+) -> str:
+    aggregation_op = temporal_aggregation.get("op")
+    if aggregation_op not in {
+        "identity",
+        "rolling_mean",
+        "rolling_std",
+        "difference",
+        "cumulative_mean",
+    }:
+        raise DSLValidationError(f"unknown temporal lineage wrapper: {aggregation_op!r}")
+    return canonical_expression(
+        _family_lineage_ast(expression, primitive_family_metadata(schema))
+    )
+
+
+def is_trivial_micro_macro_lineage(
+    micro_expression: dict[str, Any],
+    micro_aggregation: dict[str, Any],
+    macro_expression: dict[str, Any],
+    macro_aggregation: dict[str, Any],
+    schema: Iterable[dict[str, Any]],
+) -> bool:
+    """Reject a complete path whose Macro is only the Micro in another guise."""
+
+    if canonical_computational_lineage(
+        micro_expression, micro_aggregation
+    ) == canonical_computational_lineage(macro_expression, macro_aggregation):
+        return True
+    return canonical_source_family_lineage(
+        micro_expression, micro_aggregation, schema
+    ) == canonical_source_family_lineage(
+        macro_expression, macro_aggregation, schema
+    )
 
 
 def canonical_computational_lineage(

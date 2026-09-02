@@ -1,8 +1,24 @@
 {
-  "schema_version": "2.0-preformal-scale-protocol",
+  "schema_version": "3.0-final-confirmatory-protocol",
   "master_seed": 20260901,
   "formal_run": true,
   "random_seeds": [1101, 1102, 1103, 1104, 1105, 1106, 1107, 1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1117, 1118, 1119, 1120, 1121, 1122, 1123, 1124],
+  "confirmation_seeds": [2101, 2102, 2103, 2104, 2105, 2106, 2107, 2108, 2109, 2110, 2111, 2112],
+  "dose_response": {
+    "enabled": true,
+    "levels": ["minus", "mid_minus", "baseline", "mid_plus", "plus"],
+    "primary_support_levels": ["minus", "plus"]
+  },
+  "semantic_replication": {
+    "selection_generations": 3,
+    "replication_only_generations": 3
+  },
+  "temporal_negative_control": {
+    "enabled": true,
+    "repetitions": 20,
+    "minimum_shift": 20,
+    "maximum_shift": 60
+  },
   "representation": {
     "independent_generations": 3,
     "maximum_repair_rounds": 3,

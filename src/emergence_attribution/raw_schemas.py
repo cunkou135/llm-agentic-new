@@ -225,6 +225,59 @@ PUBLIC_RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
 }
 
 
+# Public semantic lineage only: these labels identify which raw fields are
+# alternate records of the same observable primitive.  They contain no hidden
+# edge, lag, mechanism, or outcome information.  ``statistic_role`` lets the
+# validator recognize an exposed aggregate count versus its per-entity event
+# without guessing from field names.
+_PUBLIC_PRIMITIVE_METADATA: dict[str, dict[str, tuple[str, str]]] = {
+    "schelling": {
+        "num_steps": ("simulation_length", "normalizer"),
+        "agent_count": ("population_size", "normalizer"),
+        "state_grid": ("spatial_configuration", "system_state"),
+        "agent_id": ("agent_identity", "identifier"),
+        "agent_group": ("social_group", "categorical_state"),
+        "agent_position": ("spatial_position", "individual_state"),
+        "district_id": ("district_membership", "membership"),
+        "local_similarity": ("local_group_exposure", "individual_measure"),
+        "neighbour_count": ("local_occupancy", "individual_measure"),
+        "unhappy": ("dissatisfaction_event", "elementary_event"),
+        "unhappy_count": ("dissatisfaction_event", "aggregate_count"),
+        "moved": ("relocation_event", "elementary_event"),
+        "move_distance": ("relocation_distance", "event_measure"),
+        "destination_similarity": ("destination_exposure", "event_measure"),
+        "boundary_agent": ("boundary_exposure", "binary_state"),
+    },
+    "deffuant": {
+        "num_steps": ("simulation_length", "normalizer"),
+        "agent_count": ("population_size", "normalizer"),
+        "state_opinion": ("opinion_state", "individual_state"),
+        "network_edges": ("network_topology", "system_structure"),
+        "partner_id": ("interaction_partner", "interaction_record"),
+        "interaction_distance": ("encounter_distance", "interaction_measure"),
+        "interaction_accepted": ("assimilation_event", "interaction_event"),
+        "interaction_backfire": ("repulsion_event", "interaction_event"),
+        "interaction_rejected": ("rejection_event", "interaction_event"),
+        "edge_rewired": ("rewiring_event", "interaction_event"),
+        "agent_shift": ("opinion_update", "event_measure"),
+        "sign_flip": ("sign_crossing_event", "elementary_event"),
+        "extreme_agent_count": ("extreme_opinion_state", "aggregate_count"),
+    },
+    "toy": {
+        "x": ("toy_lower_measure", "individual_measure"),
+        "group_id": ("toy_group_membership", "membership"),
+        "y": ("toy_aggregate_outcome", "system_state"),
+    },
+}
+
+for _scenario, _schema in PUBLIC_RAW_SCHEMAS.items():
+    _metadata = _PUBLIC_PRIMITIVE_METADATA[_scenario]
+    for _field in _schema:
+        _family, _role = _metadata[str(_field["field_name"])]
+        _field["primitive_family"] = _family
+        _field["statistic_role"] = _role
+
+
 # These fields are never included in prompts, public NPZ files, or Full Discovery
 # compilation.  They exist only for the separately labelled Controlled Recovery
 # benchmark and are persisted below data/reference_hidden/.

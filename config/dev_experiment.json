@@ -1,8 +1,24 @@
 {
-  "schema_version": "2.0-dev-scale-protocol",
+  "schema_version": "3.0-dev-final-protocol",
   "master_seed": 20260902,
   "formal_run": false,
   "random_seeds": [901, 902],
+  "confirmation_seeds": [1901],
+  "dose_response": {
+    "enabled": true,
+    "levels": ["minus", "mid_minus", "baseline", "mid_plus", "plus"],
+    "primary_support_levels": ["minus", "plus"]
+  },
+  "semantic_replication": {
+    "selection_generations": 2,
+    "replication_only_generations": 1
+  },
+  "temporal_negative_control": {
+    "enabled": true,
+    "repetitions": 2,
+    "minimum_shift": 6,
+    "maximum_shift": 12
+  },
   "representation": {
     "independent_generations": 2,
     "maximum_repair_rounds": 1,

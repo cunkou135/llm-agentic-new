@@ -19,14 +19,23 @@ from .exporting import create_visualization_bundle, generate_tables, integrate_e
 from .interventions import run_intervention_stage
 from .llm_client import LLMResponse
 from .progress import ProgressReporter
+from .primary_freeze import freeze_primary_contract, verify_primary_contract
+from .protocol_stages import (
+    run_dose_response_analysis,
+    run_falsification_analyses,
+    run_holdout_confirmation_analysis,
+)
 from .prospective import validate_prospective_predictions
 from .provenance import RunContractError, RunManager
 from .rendering import render_all_figures
 from .robustness import run_robustness_stage
 from .semantic import load_frozen_representations, run_semantic_stage
 from .simulation import (
+    HOLDOUT_PARTITION,
     compile_indicator_dataset,
     run_baseline_simulation_stage,
+    run_holdout_baseline_simulation_stage,
+    run_holdout_intervention_simulation_stage,
     run_intervention_simulation_stage,
     verify_simulation_manifest,
 )
@@ -40,6 +49,10 @@ STAGE_ORDER = [
     "intervention_simulation",
     "intervention",
     "prospective",
+    "dose_response",
+    "holdout_simulation",
+    "holdout_confirmation",
+    "temporal_negative_control",
     "robustness",
     "export",
     "render",
@@ -53,6 +66,8 @@ def load_experiment_config(path: Path) -> dict[str, Any]:
     required = {
         "master_seed", "random_seeds", "representation", "temporal",
         "intervention", "robustness", "render", "scenarios",
+        "confirmation_seeds", "dose_response", "semantic_replication",
+        "temporal_negative_control",
     }
     missing = sorted(required - set(config))
     if missing:
@@ -107,6 +122,51 @@ def load_experiment_config(path: Path) -> dict[str, Any]:
             )
         if len(config["random_seeds"]) != 24:
             raise ValueError("formal runs require exactly 24 random seeds")
+        if config["random_seeds"] != list(range(1101, 1125)):
+            raise ValueError("formal primary seeds must be exactly 1101 through 1124")
+        if config["confirmation_seeds"] != list(range(2101, 2113)):
+            raise ValueError("formal holdout seeds must be exactly 2101 through 2112")
+        if set(config["random_seeds"]) & set(config["confirmation_seeds"]):
+            raise ValueError("primary and holdout seed pools must be disjoint")
+        if config["dose_response"].get("enabled") is not True:
+            raise ValueError("formal dose-response experiment must be enabled")
+        if config["dose_response"].get("levels") != [
+            "minus", "mid_minus", "baseline", "mid_plus", "plus"
+        ]:
+            raise ValueError("formal dose-response levels are frozen at five points")
+        if config["dose_response"].get("primary_support_levels") != ["minus", "plus"]:
+            raise ValueError("primary support must remain restricted to minus and plus")
+        replication = config["semantic_replication"]
+        if replication.get("selection_generations") != 3:
+            raise ValueError("formal semantic selection requires exactly three generations")
+        if replication.get("replication_only_generations") != 3:
+            raise ValueError("formal semantic replication requires exactly three held-out generations")
+        negative = config["temporal_negative_control"]
+        if (
+            negative.get("enabled") is not True
+            or negative.get("repetitions") != 20
+            or negative.get("minimum_shift") != 20
+            or negative.get("maximum_shift") != 60
+        ):
+            raise ValueError("formal temporal negative-control settings are frozen")
+        if int(negative["minimum_shift"]) <= int(config["temporal"]["maximum_lag"]):
+            raise ValueError("negative-control shifts must exceed the maximum tested lag")
+        if len(config["scenarios"]) != 2 or any(
+            len(spec.get("interventions", {})) != 3
+            for spec in config["scenarios"].values()
+        ):
+            raise ValueError("formal task contract requires two scenarios with three parameters each")
+        primary_count = len(config["scenarios"]) * len(config["random_seeds"]) * (1 + 3 * 4 + 1)
+        holdout_count = len(config["scenarios"]) * len(config["confirmation_seeds"]) * (1 + 3 * 2 + 1)
+        if (primary_count, holdout_count, primary_count + holdout_count) != (672, 192, 864):
+            raise ValueError("formal simulator task matrix must equal 672 primary + 192 holdout = 864")
+    else:
+        if set(config["random_seeds"]) & set(config["confirmation_seeds"]):
+            raise ValueError("primary and holdout seed pools must be disjoint")
+        if int(config["temporal_negative_control"]["minimum_shift"]) <= int(
+            config["temporal"]["maximum_lag"]
+        ):
+            raise ValueError("negative-control shifts must exceed the maximum tested lag")
     return config
 
 
@@ -148,6 +208,14 @@ def run_stage(
     if manager.stage_complete(stage):
         if stage in phase_for_stage:
             verify_simulation_manifest(run_root, phase_for_stage[stage])
+        elif stage == "holdout_simulation":
+            verify_primary_contract(run_root)
+            verify_simulation_manifest(
+                run_root, "baseline", dataset_partition=HOLDOUT_PARTITION
+            )
+            verify_simulation_manifest(
+                run_root, "intervention", dataset_partition=HOLDOUT_PARTITION
+            )
         reporter.start_stage(stage)
         reporter.finish_stage(stage, skipped=True)
         return
@@ -157,7 +225,11 @@ def run_stage(
         "intervention_simulation": ["temporal"],
         "intervention": ["intervention_simulation"],
         "prospective": ["intervention"],
-        "robustness": ["prospective"],
+        "dose_response": ["prospective"],
+        "holdout_simulation": ["dose_response"],
+        "holdout_confirmation": ["holdout_simulation"],
+        "temporal_negative_control": ["holdout_confirmation"],
+        "robustness": ["temporal_negative_control"],
         "export": ["robustness"],
         "render": ["export"],
     }
@@ -178,9 +250,12 @@ def run_stage(
     elif stage == "baseline_simulation":
         details = run_baseline_simulation_stage(config, run_root, workers, callback)
         outputs = _files(run_root, [
-            "data/baseline_simulation_manifest.json", "data/raw_logs/**/baseline/*.npz",
-            "data/raw_logs/**/*.sha256", "data/reference_hidden/**/*.npz",
-            "data/reference_hidden/**/*.sha256",
+            "data/baseline_simulation_manifest.json",
+            "data/primary/baseline_simulation_manifest.json",
+            "data/primary/raw_logs/**/baseline/*.npz",
+            "data/primary/raw_logs/**/*.sha256",
+            "data/primary/reference_hidden/**/*.npz",
+            "data/primary/reference_hidden/**/*.sha256",
         ])
     elif stage == "temporal":
         verify_simulation_manifest(run_root, "baseline")
@@ -211,9 +286,12 @@ def run_stage(
     elif stage == "intervention_simulation":
         details = run_intervention_simulation_stage(config, run_root, workers, callback)
         outputs = _files(run_root, [
-            "data/intervention_simulation_manifest.json", "data/raw_logs/**/*.npz",
-            "data/raw_logs/**/*.sha256", "data/reference_hidden/**/*.npz",
-            "data/reference_hidden/**/*.sha256",
+            "data/intervention_simulation_manifest.json",
+            "data/primary/intervention_simulation_manifest.json",
+            "data/primary/raw_logs/**/*.npz",
+            "data/primary/raw_logs/**/*.sha256",
+            "data/primary/reference_hidden/**/*.npz",
+            "data/primary/reference_hidden/**/*.sha256",
         ])
     elif stage == "intervention":
         verify_simulation_manifest(run_root, "baseline")
@@ -244,8 +322,106 @@ def run_stage(
     elif stage == "prospective":
         representations = load_frozen_representations(run_root)
         prospective = validate_prospective_predictions(run_root, representations)
-        details = {"prospective_validation_rows": len(prospective)}
-        outputs = [run_root / "analysis" / "prospective_validation.csv"]
+        primary_freeze = freeze_primary_contract(run_root)
+        details = {
+            "prospective_validation_rows": len(prospective),
+            "primary_discovery_frozen": True,
+            "holdout_used_for_primary": False,
+        }
+        outputs = [
+            run_root / "analysis" / "prospective_validation.csv",
+            primary_freeze,
+        ]
+    elif stage == "dose_response":
+        verify_primary_contract(run_root)
+        representations = load_frozen_representations(run_root)
+        complete = pd.read_parquet(
+            run_root / "data" / "indicator_trajectories_complete.parquet"
+        )
+        details = run_dose_response_analysis(
+            config, run_root, representations, complete
+        )
+        verify_primary_contract(run_root)
+        outputs = _files(run_root, [
+            "analysis/dose_response_effects.csv",
+            "analysis/dose_response_summary.csv",
+        ])
+    elif stage == "holdout_simulation":
+        verify_primary_contract(run_root)
+        baseline_details = run_holdout_baseline_simulation_stage(
+            config, run_root, workers, callback
+        )
+        intervention_details = run_holdout_intervention_simulation_stage(
+            config, run_root, workers, callback
+        )
+        verify_primary_contract(run_root)
+        details = {
+            "baseline_tasks": int(baseline_details["requested_tasks"]),
+            "intervention_tasks": int(intervention_details["requested_tasks"]),
+            "total_holdout_tasks": int(baseline_details["requested_tasks"])
+            + int(intervention_details["requested_tasks"]),
+            "primary_result_unchanged": True,
+        }
+        outputs = _files(run_root, [
+            "data/holdout/*_simulation_manifest.json",
+            "data/holdout/raw_logs/**/*.npz",
+            "data/holdout/raw_logs/**/*.sha256",
+            "data/holdout/reference_hidden/**/*.npz",
+            "data/holdout/reference_hidden/**/*.sha256",
+        ])
+    elif stage == "holdout_confirmation":
+        verify_primary_contract(run_root)
+        verify_simulation_manifest(
+            run_root, "baseline", dataset_partition=HOLDOUT_PARTITION
+        )
+        verify_simulation_manifest(
+            run_root, "intervention", dataset_partition=HOLDOUT_PARTITION
+        )
+        representations = load_frozen_representations(run_root)
+        holdout = compile_indicator_dataset(
+            config,
+            run_root,
+            representations,
+            workers,
+            complete=True,
+            dataset_partition=HOLDOUT_PARTITION,
+            progress_callback=callback,
+        )
+        details = run_holdout_confirmation_analysis(
+            config, run_root, representations, holdout, workers, callback
+        )
+        outputs = _files(run_root, [
+            "data/holdout_indicator_trajectories_complete.*",
+            "analysis/holdout_paired_effects.parquet",
+            "analysis/holdout_effect_curves.parquet",
+            "analysis/holdout_intervention_classifications.csv",
+            "analysis/holdout_path_confirmation.csv",
+            "analysis/holdout_prospective_confirmation.csv",
+            "analysis/holdout_mechanism_confirmation.csv",
+        ])
+    elif stage == "temporal_negative_control":
+        verify_primary_contract(run_root)
+        representations = load_frozen_representations(run_root)
+        baseline = pd.read_parquet(
+            run_root / "data" / "indicator_trajectories_baseline.parquet"
+        )
+        complete = pd.read_parquet(
+            run_root / "data" / "indicator_trajectories_complete.parquet"
+        )
+        details = run_falsification_analyses(
+            config,
+            run_root,
+            representations,
+            baseline,
+            complete,
+            workers,
+            callback,
+        )
+        verify_primary_contract(run_root)
+        outputs = _files(run_root, [
+            "analysis/temporal_negative_control.csv",
+            "analysis/path_mechanism_attenuation.csv",
+        ])
     elif stage == "robustness":
         representations = load_frozen_representations(run_root)
         baseline = pd.read_parquet(run_root / "data" / "indicator_trajectories_baseline.parquet")
@@ -287,6 +463,8 @@ def run_stage(
     if stage == "semantic":
         manager.record_timestamp("semantic_freeze_unix_time")
         manager.record_timestamp("prediction_freeze_unix_time")
+    elif stage == "prospective":
+        manager.record_timestamp("primary_discovery_freeze_unix_time")
     reporter.finish_stage(stage)
 
 

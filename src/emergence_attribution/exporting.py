@@ -35,6 +35,13 @@ CORE_ANALYSIS_FILES = [
     "robustness_pool_profile.json",
     "causal_scalability.csv",
     "prospective_validation.csv",
+    "dose_response_effects.csv",
+    "dose_response_summary.csv",
+    "holdout_path_confirmation.csv",
+    "holdout_prospective_confirmation.csv",
+    "holdout_mechanism_confirmation.csv",
+    "temporal_negative_control.csv",
+    "path_mechanism_attenuation.csv",
 ]
 
 
@@ -119,6 +126,27 @@ def generate_tables(run_root: Path) -> list[Path]:
         )
         summary.to_csv(table_root / "prospective_validation_summary.csv", index=False)
         outputs.append(table_root / "prospective_validation_summary.csv")
+    secondary_sources = {
+        "dose_response_effects.csv": "dose_response_effects_source.csv",
+        "dose_response_summary.csv": "dose_response_summary_source.csv",
+        "holdout_path_confirmation.csv": "holdout_path_confirmation_source.csv",
+        "holdout_prospective_confirmation.csv": "holdout_prospective_confirmation_source.csv",
+        "holdout_mechanism_confirmation.csv": "holdout_mechanism_confirmation_source.csv",
+        "temporal_negative_control.csv": "temporal_negative_control_source.csv",
+        "path_mechanism_attenuation.csv": "path_mechanism_attenuation_source.csv",
+    }
+    for source_name, table_name in secondary_sources.items():
+        source = run_root / "analysis" / source_name
+        if source.exists():
+            frame = pd.read_csv(source)
+            destination = table_root / table_name
+            frame.to_csv(destination, index=False)
+            outputs.append(destination)
+    replication_pairwise = run_root / "representation" / "replication_pairwise.csv"
+    if replication_pairwise.exists():
+        destination = table_root / "semantic_replication_pairwise_source.csv"
+        pd.read_csv(replication_pairwise).to_csv(destination, index=False)
+        outputs.append(destination)
     return outputs
 
 

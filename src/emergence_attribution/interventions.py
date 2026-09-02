@@ -93,8 +93,14 @@ def aggregate_edge_intervention_evidence(
     the manipulation root, because perturbation strength may be asymmetric.
     """
 
+    identity_columns = ["scenario"]
+    if "evaluation_track" in classifications.columns:
+        identity_columns.append("evaluation_track")
+    if "method" in classifications.columns:
+        identity_columns.append("method")
+    identity_columns.extend(["source", "target"])
     columns = [
-        "scenario", "method", "source", "target", "edge_class",
+        *identity_columns, "edge_class",
         "attempt_count", "applicable_attempt_count", "supported_attempt_count",
         "contradiction_attempt_count",
     ]
@@ -105,10 +111,7 @@ def aggregate_edge_intervention_evidence(
     )
     if unknown:
         raise RuntimeError(f"unknown intervention classification values: {unknown}")
-    group_columns = ["scenario"]
-    if "method" in classifications.columns:
-        group_columns.append("method")
-    group_columns.extend(["source", "target"])
+    group_columns = identity_columns
     rows: list[dict[str, Any]] = []
     for identity, group in classifications.groupby(
         group_columns, dropna=False, sort=True
@@ -130,8 +133,6 @@ def aggregate_edge_intervention_evidence(
         else:
             edge_class = "inconclusive"
         row = dict(zip(group_columns, identity))
-        if "method" not in row:
-            row["method"] = ""
         row.update(
             {
                 "edge_class": edge_class,
@@ -912,15 +913,19 @@ def run_intervention_stage(
         )
     classification_frame = pd.concat(classifications, ignore_index=True)
     timing_frame = pd.concat(timings, ignore_index=True) if timings else pd.DataFrame()
+    effects.insert(0, "evaluation_track", "primary_discovery")
+    curves.insert(0, "evaluation_track", "primary_discovery")
+    classification_frame.insert(0, "evaluation_track", "primary_discovery")
+    if "evaluation_track" not in timing_frame.columns:
+        timing_frame.insert(0, "evaluation_track", "primary_discovery")
     analysis_root = run_root / "analysis"
     effects.to_parquet(analysis_root / "paired_effects.parquet", index=False)
     curves.to_parquet(analysis_root / "effect_curves.parquet", index=False)
     classification_frame.to_csv(
         analysis_root / "intervention_classifications.csv", index=False
     )
-    aggregate_edge_intervention_evidence(classification_frame).to_csv(
-        analysis_root / "edge_intervention_classifications.csv", index=False
-    )
+    edge_evidence = aggregate_edge_intervention_evidence(classification_frame)
+    edge_evidence.to_csv(analysis_root / "edge_intervention_classifications.csv", index=False)
     timing_frame.to_csv(analysis_root / "path_timing_summary.csv", index=False)
     selection = select_representative_paths(
         timing_frame, classification_frame

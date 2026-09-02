@@ -37,6 +37,16 @@ def _network_neighborhood(value: dict[str, Any], reducer: str) -> dict[str, Any]
     }
 
 
+def _quantile_range(
+    value: dict[str, Any], axis: str, lower: float = 0.25, upper: float = 0.75
+) -> dict[str, Any]:
+    return {
+        "op": "subtract",
+        "left": {"op": "quantile", "input": value, "axis": axis, "q": upper},
+        "right": {"op": "quantile", "input": value, "axis": axis, "q": lower},
+    }
+
+
 def _micro_expressions(
     scenario: str,
 ) -> list[tuple[str, str, str, dict[str, Any]]]:
@@ -88,19 +98,29 @@ def _meso_expressions(
             ("district composition diversity", "mean within-district group-label entropy", "district", _group_stat(_field("agent_group"), "entropy", across="mean")),
             ("district dissatisfaction heterogeneity", "between-district variance in dissatisfaction prevalence", "district", _group_stat(_field("unhappy"), "fraction")),
             ("district turnover heterogeneity", "between-district variance in relocation-event prevalence", "district", _group_stat(_field("moved"), "fraction")),
-            ("district turnover level", "mean district-level relocation-event prevalence", "district", _group_stat(_field("moved"), "fraction", across="mean")),
+            ("district turnover interquartile spread", "interquartile range across districts in relocation-event prevalence", "district", _quantile_range({"op": "group_reduce", "values": _field("moved"), "groups": _field("district_id"), "axis": "agent", "reducer": "fraction"}, "group")),
             ("district boundary heterogeneity", "between-district variance in boundary exposure prevalence", "district", _group_stat(_field("boundary_agent"), "fraction")),
             ("district destination heterogeneity", "between-district variance in destination-choice outcome", "district", _group_stat(_field("destination_similarity"), "mean")),
             ("district mobility-distance heterogeneity", "between-district variance in mean relocation distance", "district", _group_stat(_field("move_distance"), "mean")),
         ]
     neighborhood_mean = _network_neighborhood(_field("state_opinion"), "mean")
+    extreme_state = {
+        "op": "greater_equal",
+        "left": {"op": "abs", "input": _field("state_opinion")},
+        "right": {"op": "constant", "value": 0.75},
+    }
+    positive_state = {
+        "op": "greater",
+        "left": _field("state_opinion"),
+        "right": {"op": "constant", "value": 0.0},
+    }
     return [
         ("neighborhood opinion mismatch", "mean absolute difference between each opinion and its network-neighborhood mean", "neighborhood", {"op": "mean", "input": {"op": "distance", "left": _field("state_opinion"), "right": neighborhood_mean}, "axis": "agent"}),
         ("neighborhood mean separation", "variance across agents in network-neighborhood mean opinion", "neighborhood", {"op": "variance", "input": neighborhood_mean, "axis": "agent"}),
         ("neighborhood opinion dispersion", "mean within-network-neighborhood opinion standard deviation", "neighborhood", {"op": "mean", "input": _network_neighborhood(_field("state_opinion"), "std"), "axis": "agent"}),
-        ("network endpoint assortativity", "opinion correlation across current undirected network endpoints", "community", {"op": "network_assortativity", "values": _field("state_opinion"), "edges": _field("network_edges")}),
-        ("network component organization", "number of connected components in the current adaptive network", "community", {"op": "network_component_count", "edges": _field("network_edges"), "node_count": _field("agent_count")}),
-        ("largest network domain", "fraction of agents in the largest connected network domain", "local_domain", {"op": "network_largest_component_fraction", "edges": _field("network_edges"), "node_count": _field("agent_count")}),
+        ("neighborhood mean interquartile spread", "interquartile range across agents in network-neighborhood mean opinion", "neighborhood", _quantile_range(neighborhood_mean, "agent")),
+        ("neighborhood extreme-state heterogeneity", "variance across agents in neighborhood extreme-opinion prevalence", "neighborhood", {"op": "variance", "input": _network_neighborhood(extreme_state, "fraction"), "axis": "agent"}),
+        ("neighborhood sign-composition separation", "standard deviation across agents in neighborhood positive-opinion prevalence", "neighborhood", {"op": "std", "input": _network_neighborhood(positive_state, "fraction"), "axis": "agent"}),
         ("neighborhood acceptance heterogeneity", "variance across agents in neighborhood acceptance prevalence", "neighborhood", {"op": "variance", "input": _network_neighborhood(_field("interaction_accepted"), "fraction"), "axis": "agent"}),
         ("neighborhood rewiring heterogeneity", "variance across agents in neighborhood rewiring-event prevalence", "neighborhood", {"op": "variance", "input": _network_neighborhood(_field("edge_rewired"), "fraction"), "axis": "agent"}),
     ]
@@ -119,7 +139,7 @@ def _macro_expressions(
     return [
         ("whole-network opinion dispersion", "whole-system standard deviation of opinions", _reduce("std", "state_opinion")),
         ("whole-network opinion center", "whole-system mean signed opinion", _reduce("mean", "state_opinion")),
-        ("persistent whole-network polarization", "short-window whole-system prevalence of absolute opinions at least 0.75", {"op": "rolling_mean", "input": {"op": "fraction", "input": {"op": "greater_equal", "left": {"op": "abs", "input": _field("state_opinion")}, "right": {"op": "constant", "value": 0.75}}, "axis": "agent"}, "window": 3}),
+        ("whole-network opinion assortativity", "whole-network opinion correlation across current adaptive-network endpoints", {"op": "network_assortativity", "values": _field("state_opinion"), "edges": _field("network_edges")}),
         ("whole-network opinion entropy", "whole-system binned entropy of the opinion distribution", {"op": "binned_entropy", "input": _field("state_opinion"), "axis": "agent", "bins": 10}),
     ]
 

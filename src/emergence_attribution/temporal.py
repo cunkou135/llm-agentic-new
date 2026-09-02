@@ -455,7 +455,16 @@ def run_temporal_stage(
     runtime_rows: list[dict[str, Any]] = []
     for scenario, representation in sorted(representations.items()):
         semantic_seconds = 0.0
+        selection_generation_count = int(
+            config.get("semantic_replication", {}).get(
+                "selection_generations",
+                config["representation"]["independent_generations"],
+            )
+        )
         for path in sorted((run_root / "llm" / scenario).glob("generation_*/generation_result.json")):
+            generation_index = int(path.parent.name.rsplit("_", 1)[-1])
+            if generation_index >= selection_generation_count:
+                continue
             semantic_seconds += float(
                 json.loads(path.read_text(encoding="utf-8"))["duration_seconds"]
             )

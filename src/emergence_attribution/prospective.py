@@ -133,6 +133,7 @@ def validate_prospective_predictions(
             )
             rows.append(
                 {
+                    "evaluation_track": "primary_discovery",
                     "scenario": scenario,
                     "prediction_id": prediction["prediction_id"],
                     "phenomenon": prediction["phenomenon"],

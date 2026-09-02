@@ -141,15 +141,23 @@ class RunManager:
             "simulation_contract_sha256": sha256_json(
                 {
                     "random_seeds": self.config["random_seeds"],
+                    "confirmation_seeds": self.config.get("confirmation_seeds", []),
+                    "dose_response": self.config.get("dose_response", {}),
                     "scenarios": self.config["scenarios"],
                 }
             ),
             "representation_contract_sha256": sha256_json(
-                self.config["representation"]
+                {
+                    "selection": self.config["representation"],
+                    "replication": self.config.get("semantic_replication", {}),
+                }
             ),
             "temporal_contract_sha256": sha256_json(self.config["temporal"]),
             "intervention_contract_sha256": sha256_json(
                 self.config["intervention"]
+            ),
+            "temporal_negative_control_contract_sha256": sha256_json(
+                self.config.get("temporal_negative_control", {})
             ),
             "robustness_contract_sha256": sha256_json(self.config["robustness"]),
             "render_contract_sha256": sha256_json(self.config["render"]),
@@ -163,6 +171,10 @@ class RunManager:
             "representation",
             "data/raw_logs",
             "data/reference_hidden",
+            "data/primary/raw_logs",
+            "data/primary/reference_hidden",
+            "data/holdout/raw_logs",
+            "data/holdout/reference_hidden",
             "analysis",
             "visualization_input",
             "figures",
