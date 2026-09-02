@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0-dev",
+  "schema_version": "2.0-dev-scale-protocol",
   "master_seed": 20260902,
   "formal_run": false,
   "random_seeds": [901, 902],
@@ -64,10 +64,12 @@
   "scenarios": {
     "schelling": {
       "label": "NON_SCIENTIFIC delayed spatial dynamics",
-      "description": "Small public-state simulation used only for development validation.",
+      "description": "Small periodic-grid simulation with fixed public spatial districts, used only for development validation.",
       "num_agents": 40,
       "grid_width": 7,
       "grid_height": 7,
+      "district_rows": 3,
+      "district_columns": 3,
       "num_steps": 22,
       "baseline": {"tolerance": 0.55, "move_probability": 0.10, "destination_preference": 0.80},
       "parameter_descriptions": {
@@ -84,11 +86,13 @@
     },
     "deffuant": {
       "label": "NON_SCIENTIFIC delayed opinion dynamics",
-      "description": "Small public-state simulation used only for development validation.",
+      "description": "Small adaptive-network opinion simulation used only for development validation.",
       "num_agents": 24,
       "num_steps": 24,
       "network_degree": 4,
       "network_rewire_probability": 0.08,
+      "adaptive_rewiring_probability": 0.15,
+      "rewiring_homophily_probability": 0.65,
       "baseline": {"confidence_bound": 0.35, "assimilation_strength": 0.25, "backfire_threshold": 0.65, "backfire_strength": 0.02},
       "parameter_descriptions": {
         "confidence_bound": "largest opinion distance that permits assimilation",

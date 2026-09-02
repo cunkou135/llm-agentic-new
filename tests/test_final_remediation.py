@@ -46,16 +46,16 @@ def _small_schelling() -> dict:
 
 def test_public_schema_has_no_reference_derived_fields() -> None:
     expected = {
-        "schelling": {
-            "state_grid", "agent_group", "agent_position", "local_similarity",
+            "schelling": {
+                "state_grid", "agent_id", "agent_group", "agent_position", "district_id", "local_similarity",
             "neighbour_count", "unhappy", "unhappy_count", "moved",
             "move_distance", "destination_similarity", "boundary_agent",
             "num_steps", "agent_count",
         },
-        "deffuant": {
-            "state_opinion", "network_edges", "partner_id", "interaction_distance",
-            "interaction_accepted", "interaction_backfire", "interaction_rejected",
-            "agent_shift", "sign_flip", "extreme_agent_count", "num_steps", "agent_count",
+            "deffuant": {
+                "state_opinion", "network_edges", "partner_id", "interaction_distance",
+                "interaction_accepted", "interaction_backfire", "interaction_rejected",
+                "edge_rewired", "agent_shift", "sign_flip", "extreme_agent_count", "num_steps", "agent_count",
         },
     }
     for scenario, names in expected.items():

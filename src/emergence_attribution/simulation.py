@@ -363,6 +363,12 @@ def compile_indicator_task(task: IndicatorCompilationTask) -> list[dict[str, Any
             indicator["temporal_aggregation"],
             raw,
             schema,
+            # A well-defined event-conditioned observable can become undefined
+            # when an intervention or mechanism-disabled variant removes every
+            # such event.  Preserve that scientific NaN for Stage 3 to classify
+            # as inconclusive; baseline trajectories still fail closed because
+            # Stage 2 cannot estimate an entirely undefined observable.
+            allow_all_nan=task.condition != "baseline",
         )
     steps = len(next(iter(values.values())))
     records: list[dict[str, Any]] = []

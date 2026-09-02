@@ -32,8 +32,17 @@ def _valid_toy_generation() -> dict:
             "phenomenon": "toy organisation",
             "scale": scale,
             "branch_id": "branch_0",
+            "entity_scope": {
+                "micro": "individual",
+                "meso": "local_domain",
+                "macro": "whole_system",
+            }[scale],
             "entities": "toy entities",
-            "source_fields": ["x"] if identifier != "toy_macro" else ["y"],
+            "source_fields": (
+                ["group_id", "x"]
+                if identifier == "toy_meso"
+                else ["x"] if identifier != "toy_macro" else ["y"]
+            ),
             "computation": expression,
             "temporal_aggregation": {"op": "identity"},
             "parameter_associations": (
@@ -64,7 +73,17 @@ def _valid_toy_generation() -> dict:
                 indicator(
                     "toy_meso",
                     "meso",
-                    {"op": "std", "input": {"op": "field", "name": "x"}, "axis": "agent"},
+                    {
+                        "op": "variance",
+                        "input": {
+                            "op": "group_reduce",
+                            "values": {"op": "field", "name": "x"},
+                            "groups": {"op": "field", "name": "group_id"},
+                            "axis": "agent",
+                            "reducer": "mean",
+                        },
+                        "axis": "group",
+                    },
                 ),
                 indicator("toy_macro", "macro", {"op": "field", "name": "y"}),
             ],

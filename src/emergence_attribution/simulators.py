@@ -11,6 +11,7 @@ import numpy as np
 from .dsl import compute_indicator
 from .raw_schemas import raw_schema
 from .reference_truth import (
+    controlled_structural_contexts,
     mechanism_target_for_variant,
     reference_processes,
     reference_relations,
@@ -26,6 +27,26 @@ def _group_grid(agent_grid: np.ndarray, groups: np.ndarray) -> np.ndarray:
     occupied = agent_grid >= 0
     result[occupied] = groups[agent_grid[occupied]]
     return result
+
+
+def _district_grid(
+    height: int, width: int, district_rows: int, district_columns: int
+) -> np.ndarray:
+    """Return a fixed rectangular district partition for any grid dimensions."""
+
+    if not 1 <= district_rows <= height or not 1 <= district_columns <= width:
+        raise ValueError("district layout must fit within the grid")
+    row_ids = np.minimum(
+        np.arange(height, dtype=np.int32) * district_rows // height,
+        district_rows - 1,
+    )
+    column_ids = np.minimum(
+        np.arange(width, dtype=np.int32) * district_columns // width,
+        district_columns - 1,
+    )
+    return (
+        row_ids[:, None] * district_columns + column_ids[None, :]
+    ).astype(np.int16)
 
 
 def _neighbour_values(group_grid: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -68,6 +89,7 @@ def _toroidal_distance(
 
 def _delayed_channel(
     driver: np.ndarray,
+    structural_context: np.ndarray,
     lag: int,
     sign: int,
     seed: int,
@@ -76,15 +98,18 @@ def _delayed_channel(
     disabled: bool,
 ) -> np.ndarray:
     driver = np.asarray(driver, dtype=float)
+    structural_context = np.asarray(structural_context, dtype=float)
+    if driver.shape != structural_context.shape:
+        raise ValueError("controlled driver and structural context must have equal shape")
     output = np.empty(len(driver), dtype=float)
     output[0] = 0.5
     for time in range(1, len(driver)):
         innovation = counter_rng(seed, time, stream).normal(0.0, 0.025)
-        if disabled or time < lag:
-            target = 0.5 + innovation
-        else:
+        context = float(np.clip(structural_context[time], 0.0, 1.0)) - 0.5
+        target = 0.5 + 0.30 * context + innovation
+        if not disabled and time >= lag:
             centred = float(np.clip(driver[time - lag], 0.0, 1.0)) - 0.5
-            target = 0.5 + 0.70 * sign * centred + innovation
+            target += 0.60 * sign * centred
         output[time] = np.clip(
             autoregression * output[time - 1] + (1.0 - autoregression) * target,
             0.0,
@@ -106,6 +131,7 @@ def _attach_controlled_channels(
     meso = np.empty((int(raw["num_steps"][0]), 4), dtype=float)
     macro = np.empty_like(meso)
     disabled_name = mechanism_target_for_variant(scenario, mechanism_variant)
+    contexts = controlled_structural_contexts(scenario)
     for index in range(4):
         edge = next(item for item in micro_to_meso if item.target == f"{prefix}_meso_{index}")
         process = processes[edge.source]
@@ -115,8 +141,21 @@ def _attach_controlled_channels(
             raw,
             raw_schema(scenario),
         )
+        meso_context = compute_indicator(
+            contexts[index][0],
+            {"op": "identity"},
+            raw,
+            raw_schema(scenario),
+        )
+        macro_context = compute_indicator(
+            contexts[index][1],
+            {"op": "identity"},
+            raw,
+            raw_schema(scenario),
+        )
         meso[:, index] = _delayed_channel(
             driver,
+            meso_context,
             edge.lag,
             edge.sign,
             seed,
@@ -127,6 +166,7 @@ def _attach_controlled_channels(
         second = next(item for item in relations if item.source == f"{prefix}_meso_{index}")
         macro[:, index] = _delayed_channel(
             meso[:, index],
+            macro_context,
             second.lag,
             second.sign,
             seed,
@@ -162,6 +202,12 @@ def simulate_schelling(
         float(parameters["destination_preference"]),
     )
     preference = 0.0 if mechanism_variant == "disable_homophilic_relocation" else p.destination_preference
+    districts = _district_grid(
+        height,
+        width,
+        int(spec.get("district_rows", 3)),
+        int(spec.get("district_columns", 3)),
+    )
     initial = counter_rng(seed, 0, 1)
     groups = np.arange(agents, dtype=np.int8) % 2
     initial.shuffle(groups)
@@ -172,8 +218,10 @@ def simulate_schelling(
     positions = np.column_stack(np.unravel_index(occupied, (height, width))).astype(np.int32)
     raw: dict[str, np.ndarray] = {
         "state_grid": np.empty((steps, height, width), dtype=np.int8),
+        "agent_id": np.arange(agents, dtype=np.int32),
         "agent_group": groups,
         "agent_position": np.empty((steps, agents, 2), dtype=np.int32),
+        "district_id": np.empty((steps, agents), dtype=np.int16),
         "local_similarity": np.empty((steps, agents), dtype=np.float32),
         "neighbour_count": np.empty((steps, agents), dtype=np.int16),
         "unhappy": np.zeros((steps, agents), dtype=bool),
@@ -192,6 +240,7 @@ def simulate_schelling(
         raw["agent_position"][time] = positions
         similarity_grid, same_grid, total_grid = _neighbour_values(group_grid)
         rows, columns = positions[:, 0], positions[:, 1]
+        raw["district_id"][time] = districts[rows, columns]
         similarity = similarity_grid[rows, columns]
         total = total_grid[rows, columns]
         same = same_grid[rows, columns]
@@ -250,6 +299,67 @@ def _opinion_network(seed: int, agents: int, degree: int, rewire: float) -> np.n
     return np.asarray(sorted((min(a, b), max(a, b)) for a, b in graph.edges()), dtype=np.int32)
 
 
+def _network_neighbours(edges: np.ndarray, agents: int) -> list[np.ndarray]:
+    neighbours: list[list[int]] = [[] for _ in range(agents)]
+    for left, right in np.asarray(edges, dtype=np.int32):
+        neighbours[int(left)].append(int(right))
+        neighbours[int(right)].append(int(left))
+    result = [np.asarray(sorted(values), dtype=np.int32) for values in neighbours]
+    if any(not len(values) for values in result):
+        raise RuntimeError("adaptive interaction network contains an isolated agent")
+    return result
+
+
+def _rewire_interaction_edge(
+    edge_set: set[tuple[int, int]],
+    focal: int,
+    partner: int,
+    opinions: np.ndarray,
+    random_priority: np.ndarray,
+    prefer_homophily: bool,
+) -> bool:
+    """Replace one sampled tie while preserving a simple undirected graph."""
+
+    old_edge = (min(focal, partner), max(focal, partner))
+    if old_edge not in edge_set:
+        return False
+    partner_degree = sum(partner in edge for edge in edge_set)
+    if partner_degree <= 1:
+        # Rewiring is a tie replacement, not node deletion.  Keeping the
+        # previous tie avoids creating an isolated agent that could no longer
+        # participate in the next step's neighbour-sampling rule.
+        return False
+    current_neighbours = {
+        right if left == focal else left
+        for left, right in edge_set
+        if left == focal or right == focal
+    }
+    candidates = sorted(
+        set(range(len(opinions))) - {focal, partner} - current_neighbours
+    )
+    if not candidates:
+        return False
+    ordered = sorted(candidates, key=lambda node: (float(random_priority[node]), node))
+    sampled = ordered[: min(6, len(ordered))]
+    if prefer_homophily:
+        destination = min(
+            sampled,
+            key=lambda node: (
+                abs(float(opinions[focal]) - float(opinions[node])),
+                float(random_priority[node]),
+                node,
+            ),
+        )
+    else:
+        destination = sampled[0]
+    new_edge = (min(focal, destination), max(focal, destination))
+    if new_edge in edge_set or new_edge[0] == new_edge[1]:
+        return False
+    edge_set.remove(old_edge)
+    edge_set.add(new_edge)
+    return True
+
+
 def simulate_deffuant(
     seed: int,
     spec: dict[str, Any],
@@ -261,12 +371,17 @@ def simulate_deffuant(
     edges = _opinion_network(
         seed, agents, int(spec["network_degree"]), float(spec["network_rewire_probability"])
     )
-    neighbours: list[np.ndarray] = []
-    for agent in range(agents):
-        connected = np.concatenate(
-            [edges[edges[:, 0] == agent, 1], edges[edges[:, 1] == agent, 0]]
-        )
-        neighbours.append(np.sort(connected))
+    edge_count = len(edges)
+    adaptive_rewiring_probability = float(
+        spec.get("adaptive_rewiring_probability", 0.15)
+    )
+    rewiring_homophily_probability = float(
+        spec.get("rewiring_homophily_probability", 0.65)
+    )
+    if not 0.0 <= adaptive_rewiring_probability <= 1.0:
+        raise ValueError("adaptive_rewiring_probability must be within [0, 1]")
+    if not 0.0 <= rewiring_homophily_probability <= 1.0:
+        raise ValueError("rewiring_homophily_probability must be within [0, 1]")
     p = DeffuantParameters(
         float(parameters["confidence_bound"]),
         float(parameters["assimilation_strength"]),
@@ -282,12 +397,13 @@ def simulate_deffuant(
     )
     raw: dict[str, np.ndarray] = {
         "state_opinion": np.empty((steps, agents), dtype=np.float32),
-        "network_edges": edges,
+        "network_edges": np.empty((steps, edge_count, 2), dtype=np.int32),
         "partner_id": np.empty((steps, agents), dtype=np.int32),
         "interaction_distance": np.empty((steps, agents), dtype=np.float32),
         "interaction_accepted": np.zeros((steps, agents), dtype=bool),
         "interaction_backfire": np.zeros((steps, agents), dtype=bool),
         "interaction_rejected": np.zeros((steps, agents), dtype=bool),
+        "edge_rewired": np.zeros((steps, agents), dtype=bool),
         "agent_shift": np.zeros((steps, agents), dtype=np.float32),
         "sign_flip": np.zeros((steps, agents), dtype=bool),
         "extreme_agent_count": np.zeros(steps, dtype=np.int32),
@@ -296,6 +412,8 @@ def simulate_deffuant(
     }
     for time in range(steps):
         raw["state_opinion"][time] = opinions
+        raw["network_edges"][time] = edges
+        neighbours = _network_neighbours(edges, agents)
         uniforms = counter_rng(seed, time, 42).random(agents)
         partners = np.asarray(
             [
@@ -325,6 +443,28 @@ def simulate_deffuant(
         raw["agent_shift"][time] = shift
         raw["sign_flip"][time] = np.sign(updated) != np.sign(opinions)
         raw["extreme_agent_count"][time] = int(np.sum(np.abs(opinions) >= 0.75))
+        rewiring_draws = counter_rng(seed, time, 43).random(agents)
+        homophily_draws = counter_rng(seed, time, 44).random(agents)
+        edge_set = {
+            (int(left), int(right)) for left, right in np.asarray(edges, dtype=np.int32)
+        }
+        for agent in range(agents):
+            if not (rejected[agent] or backfire[agent]):
+                continue
+            if rewiring_draws[agent] >= adaptive_rewiring_probability:
+                continue
+            priority = counter_rng(seed, time, 4000 + agent).random(agents)
+            raw["edge_rewired"][time, agent] = _rewire_interaction_edge(
+                edge_set,
+                agent,
+                int(partners[agent]),
+                opinions,
+                priority,
+                bool(homophily_draws[agent] < rewiring_homophily_probability),
+            )
+        edges = np.asarray(sorted(edge_set), dtype=np.int32)
+        if len(edges) != edge_count:
+            raise RuntimeError("adaptive rewiring changed the network edge count")
         opinions = updated
     return raw
 

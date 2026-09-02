@@ -35,6 +35,13 @@ PUBLIC_RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
             "entity_level": "cell",
         },
         {
+            "field_name": "agent_id",
+            "dtype": "int32",
+            "shape": ["agent"],
+            "semantic_meaning": "stable public identifier of each agent",
+            "entity_level": "agent",
+        },
+        {
             "field_name": "agent_group",
             "dtype": "int8",
             "shape": ["agent"],
@@ -47,6 +54,13 @@ PUBLIC_RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
             "shape": ["time", "agent", "coordinate"],
             "semantic_meaning": "row and column occupied by every agent",
             "entity_level": "agent",
+        },
+        {
+            "field_name": "district_id",
+            "dtype": "int16",
+            "shape": ["time", "agent"],
+            "semantic_meaning": "fixed spatial district containing each agent at the start of the recorded step",
+            "entity_level": "district membership",
         },
         {
             "field_name": "local_similarity",
@@ -117,8 +131,8 @@ PUBLIC_RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
         {
             "field_name": "network_edges",
             "dtype": "int32",
-            "shape": ["edge", "endpoint"],
-            "semantic_meaning": "undirected static interaction-network endpoint pairs",
+            "shape": ["time", "edge", "endpoint"],
+            "semantic_meaning": "undirected interaction-network endpoint pairs used for partner sampling at the start of each step",
             "entity_level": "edge",
         },
         {
@@ -157,6 +171,13 @@ PUBLIC_RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
             "entity_level": "interaction",
         },
         {
+            "field_name": "edge_rewired",
+            "dtype": "bool",
+            "shape": ["time", "agent"],
+            "semantic_meaning": "whether the sampled rejected or backfire tie was successfully replaced for this focal agent",
+            "entity_level": "interaction",
+        },
+        {
             "field_name": "agent_shift",
             "dtype": "float32",
             "shape": ["time", "agent"],
@@ -185,6 +206,13 @@ PUBLIC_RAW_SCHEMAS: dict[str, list[dict[str, Any]]] = {
             "shape": ["time", "agent"],
             "semantic_meaning": "toy lower-level measurements",
             "entity_level": "agent",
+        },
+        {
+            "field_name": "group_id",
+            "dtype": "int32",
+            "shape": ["time", "agent"],
+            "semantic_meaning": "toy intermediate group membership",
+            "entity_level": "district membership",
         },
         {
             "field_name": "y",
@@ -223,17 +251,20 @@ HIDDEN_REFERENCE_FIELD_NAMES = frozenset(
 RULES = {
     "schelling": [
         "Each occupied cell contains one fixed-group agent and the grid is periodic.",
+        "The periodic grid is partitioned into fixed public spatial districts; district membership follows an agent's current cell and is not a precomputed segregation outcome.",
         "An agent is unsatisfied when its occupied-neighbour same-group fraction is below tolerance.",
         "An unsatisfied agent attempts movement with move_probability.",
         "A moving agent samples vacancies and, with destination_preference, chooses the sampled vacancy with the highest local similarity.",
         "Disabling homophilic relocation makes destination choice non-preferential while preserving other rules.",
     ],
     "deffuant": [
-        "Each agent samples one network neighbour per step.",
+        "Each agent samples one neighbour from the current undirected network per step.",
         "Opinion distance within confidence_bound produces assimilation proportional to assimilation_strength.",
         "Distance at least backfire_threshold produces a weak repulsive update when the mechanism is enabled.",
         "Other encounters are rejected and opinions remain bounded to [-1, 1].",
-        "Disabling backfire sets repulsive update strength to zero while preserving other rules.",
+        "Rejected or backfire encounters may replace the sampled tie at a fixed adaptive_rewiring_probability; replacement candidates exclude self-loops and duplicate edges, preserve at least one tie per agent, and use a disclosed weak homophilic preference.",
+        "The time-varying fixed-edge-count edge list records the network used at the start of each step; successful rewiring affects the next step.",
+        "Disabling backfire sets repulsive update strength to zero while preserving rejection-triggered adaptive rewiring.",
     ],
 }
 
@@ -257,7 +288,7 @@ def raw_schema(scenario: str) -> list[dict[str, Any]]:
 
 
 def prompt_scenario_contract(scenario: str, spec: dict[str, Any]) -> dict[str, Any]:
-    return {
+    contract = {
         "scenario": scenario,
         "description": spec["description"],
         "agent_rules": list(RULES[scenario]),
@@ -273,3 +304,32 @@ def prompt_scenario_contract(scenario: str, spec: dict[str, Any]) -> dict[str, A
         ],
         "raw_field_schema": public_raw_schema(scenario),
     }
+    if scenario == "schelling":
+        contract["public_environment_structure"] = {
+            "periodic_grid": True,
+            "district_rows": int(spec.get("district_rows", 3)),
+            "district_columns": int(spec.get("district_columns", 3)),
+            "district_semantics": (
+                "fixed spatial domains defined before simulation; district_id is a "
+                "primitive membership label, not an inferred outcome"
+            ),
+        }
+    elif scenario == "deffuant":
+        contract["public_environment_structure"] = {
+            "initial_network_model": "Watts-Strogatz undirected fixed-edge-count network",
+            "initial_network_rewire_probability": float(
+                spec["network_rewire_probability"]
+            ),
+            "adaptive_rewiring_probability": float(
+                spec["adaptive_rewiring_probability"]
+            ),
+            "rewiring_homophily_probability": float(
+                spec["rewiring_homophily_probability"]
+            ),
+            "adaptive_rule": (
+                "rejected or backfire encounters can replace the sampled tie; "
+                "no self-loop, duplicate edge, or isolated agent is permitted and "
+                "edge count is preserved"
+            ),
+        }
+    return contract

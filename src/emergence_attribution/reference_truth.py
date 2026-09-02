@@ -50,8 +50,52 @@ def _mean(name: str) -> dict[str, Any]:
     return {"op": "mean", "input": _field(name), "axis": "agent"}
 
 
+def _mean_expression(input_: dict[str, Any]) -> dict[str, Any]:
+    return {"op": "mean", "input": input_, "axis": "agent"}
+
+
 def _channel(index: int) -> dict[str, Any]:
     return {"op": "select", "input": _field("mechanism_channel"), "axis": "channel", "index": index}
+
+
+def _constant(value: float) -> dict[str, Any]:
+    return {"op": "constant", "value": value}
+
+
+def _scale(input_: dict[str, Any], factor: float) -> dict[str, Any]:
+    return {"op": "multiply", "left": input_, "right": _constant(factor)}
+
+
+def _clip01(input_: dict[str, Any]) -> dict[str, Any]:
+    return {"op": "clip", "input": input_, "minimum": 0.0, "maximum": 1.0}
+
+
+def _district_variance(field: str, reducer: str) -> dict[str, Any]:
+    return _clip01(
+        _scale(
+            {
+                "op": "variance",
+                "input": {
+                    "op": "group_reduce",
+                    "values": _field(field),
+                    "groups": _field("district_id"),
+                    "axis": "agent",
+                    "reducer": reducer,
+                },
+                "axis": "group",
+            },
+            4.0,
+        )
+    )
+
+
+def _neighborhood(values: dict[str, Any], reducer: str) -> dict[str, Any]:
+    return {
+        "op": "network_neighborhood_reduce",
+        "values": values,
+        "edges": _field("network_edges"),
+        "reducer": reducer,
+    }
 
 
 _MICRO = {
@@ -65,9 +109,143 @@ _MICRO = {
         ("d_micro_assimilation", _fraction("interaction_accepted")),
         ("d_micro_shift", {"op": "mean", "input": {"op": "abs", "input": _field("agent_shift")}, "axis": "agent"}),
         ("d_micro_repulsion", _fraction("interaction_backfire")),
-        ("d_micro_rejection", _fraction("interaction_rejected")),
+        ("d_micro_rewiring", _fraction("edge_rewired")),
     ],
 }
+
+
+_STRUCTURAL_CONTEXT = {
+    "schelling": [
+        (
+            _district_variance("unhappy", "fraction"),
+            _mean("local_similarity"),
+        ),
+        (
+            _district_variance("moved", "fraction"),
+            _fraction("moved"),
+        ),
+        (
+            _district_variance("boundary_agent", "fraction"),
+            _clip01(
+                {
+                    "op": "subtract",
+                    "left": _constant(1.0),
+                    "right": {
+                        "op": "spatial_neighbor_similarity",
+                        "input": _field("state_grid"),
+                    },
+                }
+            ),
+        ),
+        (
+            _district_variance("destination_similarity", "mean"),
+            _mean("destination_similarity"),
+        ),
+    ],
+    "deffuant": [
+        (
+            _clip01(
+                _scale(
+                    {
+                        "op": "variance",
+                        "input": _neighborhood(
+                            _field("interaction_accepted"), "fraction"
+                        ),
+                        "axis": "agent",
+                    },
+                    4.0,
+                )
+            ),
+            _clip01(
+                {
+                    "op": "subtract",
+                    "left": _constant(1.0),
+                    "right": {
+                        "op": "std",
+                        "input": _field("state_opinion"),
+                        "axis": "agent",
+                    },
+                }
+            ),
+        ),
+        (
+            _clip01(
+                _scale(
+                    {
+                        "op": "variance",
+                        "input": _neighborhood(
+                            {"op": "abs", "input": _field("agent_shift")}, "mean"
+                        ),
+                        "axis": "agent",
+                    },
+                    4.0,
+                )
+            ),
+            _clip01(
+                {
+                    "op": "subtract",
+                    "left": _constant(1.0),
+                    "right": {
+                        "op": "std",
+                        "input": _field("state_opinion"),
+                        "axis": "agent",
+                    },
+                }
+            ),
+        ),
+        (
+            _clip01(
+                {
+                    "op": "divide",
+                    "left": {
+                        "op": "mean",
+                        "input": {
+                            "op": "distance",
+                            "left": _field("state_opinion"),
+                            "right": _neighborhood(_field("state_opinion"), "mean"),
+                        },
+                        "axis": "agent",
+                    },
+                    "right": _constant(2.0),
+                }
+            ),
+            _clip01(
+                _mean_expression({"op": "abs", "input": _field("state_opinion")})
+            ),
+        ),
+        (
+            _clip01(
+                _scale(
+                    {
+                        "op": "variance",
+                        "input": _neighborhood(_field("edge_rewired"), "fraction"),
+                        "axis": "agent",
+                    },
+                    4.0,
+                )
+            ),
+            _clip01(
+                {
+                    "op": "divide",
+                    "left": {
+                        "op": "network_component_count",
+                        "edges": _field("network_edges"),
+                        "node_count": _field("agent_count"),
+                    },
+                    "right": _field("agent_count"),
+                }
+            ),
+        ),
+    ],
+}
+
+
+def controlled_structural_contexts(
+    scenario: str,
+) -> tuple[tuple[dict[str, Any], dict[str, Any]], ...]:
+    """Return hidden benchmark contexts anchored to actual public structure."""
+
+    return tuple(_STRUCTURAL_CONTEXT[scenario])
 
 
 _LAGS = {
@@ -115,7 +293,7 @@ def reference_relations(scenario: str) -> tuple[ReferenceRelation, ...]:
             "homophilic_destination_selection",
         )
         if scenario == "schelling"
-        else ("assimilation", "contraction", "repulsion", "rejection")
+        else ("assimilation", "contraction", "repulsion", "adaptive_rewiring")
     )
     relations: list[ReferenceRelation] = []
     for index, ((micro_id, _), (lag, sign), mechanism) in enumerate(

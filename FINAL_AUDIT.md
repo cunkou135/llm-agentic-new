@@ -6,6 +6,23 @@ Scope: current project only. No real LLM API, formal 24-seed experiment,
 formal 100-repetition trajectory bootstrap suite, or formal 500-repetition
 paired bootstrap suite was run. All cited executions are NON_SCIENTIFIC.
 
+This audit includes the pre-formal scale-protocol revision. The prior `res1`
+release remains development/pilot evidence for the older permissive scale
+contract and is not eligible for resume or scientific-artifact reuse.
+
+## Scale-protocol upgrade gates
+
+| Gate | Verified contract | Status |
+|---|---|---|
+| Schelling structural Meso | Fixed 3 x 3 public districts on the unchanged periodic formal grid; district membership is a primitive, not an outcome; relocation remains global and stochastic. | PASS |
+| Deffuant structural Meso | Dynamic simple undirected network; rejected/backfire encounters use fixed-probability adaptive rewiring; edge count and non-isolation are preserved; `disable_backfire` retains rewiring. | PASS |
+| Typed scientific scale | Micro entity scopes are elementary/local; Meso scopes require a real group/network structural operator; Macro scope is whole system. | PASS |
+| Trivial lineage rejection | Nested smoothing, differencing, clipping, and constant-rescaling-only cross-scale edges fail with `trivial_cross_scale_transform`. | PASS |
+| Public/hidden boundary | District/network primitives are public; hidden channels remain separately stored; Full Discovery inference modules do not import reference truth. | PASS |
+| Counter-based pairing | Same seed reproduces bitwise trajectories and aligned initial states; new rewiring draws use independent time/event/agent keys. | PASS |
+| Empty scientific result handling | Intervention-only absent-event indicators preserve NaN as inconclusive while baseline all-NaN fails; zero retained paths preserve a headered empty schema through export/render. | PASS |
+| Frozen formal settings | 16/8/4, four branches, 28--48 edges, three generations/repairs, 24 seeds, and all Stage 2/3 thresholds are checked at formal config load. | PASS |
+
 ## Final correction gates
 
 | Gate | Issue | Old behavior | New behavior | Test | Status |
@@ -40,21 +57,21 @@ may weaken or disappear; it does not require unrelated dynamics to vanish.
 The formal configuration remains at 24 seeds, lags 1--5, parent alpha 0.10,
 within-family BH-FDR 0.05, 100 trajectory bootstraps, support 0.65, 500 paired
 bootstraps, 95% intervals, onset start 0, minimum standardised effect 0.10,
-four consecutive steps, evaluation start 15, and lag tolerance 2. No Stage 2
+four consecutive steps, evaluation start 15, terminal window 24, and lag tolerance 2. No Stage 2
 estimator or threshold was changed.
 
 ## NON_SCIENTIFIC verification
 
-- Pytest: 93 passed.
-- Toy smoke: PASS, `smoke_runs/final_prerun_20260902_01/`.
+- Pytest: 111 passed.
+- Toy smoke: PASS, `smoke_runs/protocol_upgrade_20260902_01/`.
 - Two-scenario dev E2E: PASS,
-  `dev_runs/final_prerun_20260902_01/`; every stage from semantic through render
+  `dev_runs/protocol_upgrade_20260902_04/`; every stage from semantic through render
   completed, the run is frozen, and `real_llm_api_called=false`.
 - Dev final gates: mechanism alignment, distinct representation repetitions,
   n=1 missing stability, exact prospective paths, assortativity relabel
   invariance, contradiction precedence, Figure 4, Figure 7, and pool lifecycle
   all passed.
-- Dev robustness profile: 60 outer jobs, 1 actual pool, 0 nested pools, 7.248 s
+- Dev robustness profile: 60 outer jobs, 1 actual pool, 0 nested pools, 5.660 s
   sweep wall time.
 - Lifecycle performance smoke: identical outputs; legacy 60 pools / 301.480 s,
   reused architecture 1 pool / 5.190 s.
@@ -72,5 +89,5 @@ contradiction rates, prospective outcomes, or paper figures.
 Unique formal command (run only after configuring the real local LLM key):
 
 ```powershell
-E:\conda\python.exe run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_acl2026_20260902_01 --workers auto --plot-repo "..\llm-agentic-dis"
+E:\conda\python.exe run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --plot-repo "..\llm-agentic-dis"
 ```

@@ -51,6 +51,28 @@ CLASSIFICATION_COLUMNS = [
 ]
 
 
+PATH_TIMING_COLUMNS = [
+    "scenario",
+    "path_id",
+    "parameter",
+    "direction",
+    "source",
+    "meso",
+    "macro",
+    "node_id",
+    "scale",
+    "onset_time",
+    "onset_ci_low",
+    "onset_ci_high",
+    "observational_lag",
+    "response_delay",
+    "lag_difference",
+    "cumulative_effect",
+    "cumulative_effect_raw",
+    "significant",
+]
+
+
 INTERVENTION_CLASSES = {
     "supported",
     "directionally_contradicted",
@@ -746,7 +768,10 @@ def path_timing_summary(
                             "significant": item.significant,
                         }
                     )
-    return pd.DataFrame(rows)
+    # An empty path set is a valid scientific result.  Preserve the stable
+    # schema so exporters and renderers can distinguish zero records from a
+    # malformed headerless file.
+    return pd.DataFrame(rows, columns=PATH_TIMING_COLUMNS)
 
 
 def eligible_propagation_path_ids(

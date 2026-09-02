@@ -17,6 +17,8 @@ from .dsl import (
     computation_signature,
     expression_fields,
     grammar_description,
+    is_trivial_cross_scale_transform,
+    mesoscopic_structure_operators,
     validate_indicator_expression,
     validate_temporal_aggregation,
 )
@@ -44,6 +46,12 @@ FORBIDDEN_PROMPT_KEYS = {
     "reference lag",
     "reference sign",
     "truth role",
+}
+
+SCALE_ENTITY_SCOPES = {
+    "micro": {"individual", "interaction", "elementary_event", "local_process"},
+    "meso": {"neighborhood", "district", "community", "cluster", "local_domain"},
+    "macro": {"whole_system"},
 }
 
 
@@ -164,6 +172,10 @@ def build_prompt(
     contract = prompt_scenario_contract(scenario, scenario_spec)
     contract["generic_computation_grammar"] = grammar_description()
     contract["representation_budget"] = representation_config["budget"]
+    contract["representation_capacity_control"] = (
+        "The indicator, branch, and candidate-edge budgets are frozen capacity "
+        "controls for this experiment, not universal theoretical scale counts."
+    )
     contract["required_branch_count"] = representation_config["required_branch_count"]
     contract["candidate_edge_bounds"] = {
         "minimum": representation_config["minimum_candidate_edges"],
@@ -181,6 +193,30 @@ def build_prompt(
         "prospective validation criteria must be Boolean and edge-list fields, not prose",
         "the model must not infer any result from unprovided simulation statistics",
     ]
+    contract["scale_semantics"] = {
+        "micro": (
+            "The scientific object is an individual agent, pairwise interaction, "
+            "elementary event, or local primitive process. Population prevalence "
+            "of elementary events remains Micro when entity_scope and rationale "
+            "identify that elementary object."
+        ),
+        "meso": (
+            "The scientific object is an actual subset, neighborhood, district, "
+            "community, cluster, or local domain. A Meso computation must use a "
+            "group, district, neighborhood, or network-structure operator."
+        ),
+        "macro": (
+            "The scientific object is the whole-system collective state or outcome "
+            "and entity_scope must be whole_system."
+        ),
+    }
+    contract["trivial_cross_scale_rule"] = (
+        "A cross-scale candidate edge is invalid when source and target have the "
+        "same canonical computation after stripping identity, rolling window, "
+        "difference, cumulative smoothing, and constant affine/rescaling wrappers, "
+        "unless the target introduces a new group/network/spatial structural entity. "
+        "Temporal smoothing alone never creates a scientific scale transition."
+    )
     user = (
         "Input contract:\n"
         + json.dumps(contract, indent=2, ensure_ascii=False)
@@ -255,6 +291,10 @@ def validate_generation(
         if paths.get(branch, 0) < 1:
             errors.append(f"branch {branch} lacks a complete micro to meso to macro path")
     schema = raw_schema(scenario)
+    schema_entity_levels = {
+        str(item["field_name"]): str(item.get("entity_level", ""))
+        for item in schema
+    }
     for indicator in representation.indicators:
         try:
             validate_indicator_expression(indicator.computation, schema)
@@ -270,6 +310,28 @@ def validate_generation(
         if actual_fields != set(indicator.source_fields):
             errors.append(
                 f"indicator {indicator.id}: source_fields must exactly match AST fields {sorted(actual_fields)}"
+            )
+        if indicator.entity_scope not in SCALE_ENTITY_SCOPES[indicator.scale]:
+            errors.append(
+                f"indicator {indicator.id}: entity_scope {indicator.entity_scope!r} "
+                f"is invalid for {indicator.scale} scale"
+            )
+        if indicator.scale == "micro":
+            elementary_levels = {"agent", "interaction", "cell", "edge"}
+            if not any(
+                schema_entity_levels.get(field) in elementary_levels
+                for field in actual_fields
+            ):
+                errors.append(
+                    f"indicator {indicator.id}: Micro computation must derive from "
+                    "an agent, interaction, elementary event, cell, or edge primitive"
+                )
+        if indicator.scale == "meso" and not mesoscopic_structure_operators(
+            indicator.computation
+        ):
+            errors.append(
+                f"indicator {indicator.id}: Meso requires a group, district, "
+                "neighborhood, community, cluster, or network structural operation"
             )
     parameter_names = set(scenario_spec["interventions"])
     proposed_parameters: set[str] = set()
@@ -296,6 +358,22 @@ def validate_generation(
                 f"parameters require at least one direct micro source: {missing_direct}"
             )
     edge_pairs = {(edge.source, edge.target) for edge in representation.candidate_edges}
+    indicator_lookup = {item.id: item for item in representation.indicators}
+    trivial_edges: list[tuple[str, str]] = []
+    for edge in representation.candidate_edges:
+        source = indicator_lookup[edge.source]
+        target = indicator_lookup[edge.target]
+        if is_trivial_cross_scale_transform(
+            source.computation,
+            source.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+            target.computation,
+            target.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+        ):
+            trivial_edges.append((edge.source, edge.target))
+            errors.append(
+                f"candidate edge {edge.source}->{edge.target}: "
+                "trivial_cross_scale_transform"
+            )
     incoming = {item.id: 0 for item in representation.indicators}
     outgoing = {item.id: 0 for item in representation.indicators}
     for source, target in edge_pairs:
@@ -396,6 +474,7 @@ def validate_generation(
         "parameter_coverage": sorted(proposed_parameters),
         "indicator_count": len(representation.indicators),
         "candidate_edge_count": len(representation.candidate_edges),
+        "trivial_cross_scale_edge_count": len(trivial_edges),
         "direct_micro_parameter_sources": {
             name: sorted(sources) for name, sources in direct_micro_sources.items()
         },

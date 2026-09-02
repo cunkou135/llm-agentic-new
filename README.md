@@ -10,6 +10,18 @@ The project keeps three evidence types separate:
 
 A temporally qualified relation is not labelled as an unrestricted causal relation.
 
+This checkout implements the pre-formal scale-protocol revision. Schelling now
+exposes fixed spatial-district membership as a public primitive, and Deffuant
+uses a time-varying adaptive interaction network. Stage 1 must declare a typed
+scientific entity scope: Micro means an individual/interaction/elementary
+process, Meso requires an actual district/neighborhood/community/local-domain
+operation, and Macro means the whole system. Temporal smoothing, differencing,
+or constant rescaling alone cannot justify a cross-scale candidate edge.
+
+The 16 Micro / 8 Meso / 4 Macro, four-branch, 28--48-edge budget is a frozen
+representation capacity control for this experiment, not a theoretical claim
+that every use of the method requires those counts.
+
 Stage 3 changes simulator parameters only.  Direct Micro->Meso evidence uses
 `parameter -> Micro -> Meso`; Meso->Macro evidence reuses the same upstream
 Micro manipulation root and is labelled `upstream_mediated`.  Generated Micro,
@@ -32,7 +44,7 @@ Fill `config/llm_api.local.json`, then run:
 python run_experiment.py `
   --config config\experiment.json `
   --llm-config config\llm_api.local.json `
-  --run-id rerun_001 `
+  --run-id formal_scale_v2_001 `
   --workers auto `
   --plot-repo "..\llm-agentic-dis"
 ```
@@ -43,9 +55,22 @@ hashes verify; existing LLM history is append-only. Generate Figure 2--8
 afterward with `render_paper_figures.py`; see `RUNBOOK.md` for the exact commands
 and artifact map.
 
+The published `res1` result is retained as development/pilot evidence for the
+earlier scale contract. Do not resume it, copy its scientific artifacts into a
+new run, or combine its favorable rows with the revised protocol. The first
+formal execution of this protocol must use a never-before-used run id such as
+`formal_scale_v2_001` and begin at `semantic`.
+
 ## Integrity gates
 
 - Formal semantic generation fails closed if the API key is absent.
+- Formal configuration validation freezes the 16/8/4 capacity, three
+  generations, three repair rounds, 24 seeds, and all Stage 2/3 thresholds.
+- Public Schelling logs contain primitive `agent_id`, `agent_position`,
+  `agent_group`, and `district_id`; they do not contain district outcome scores.
+- Public Deffuant logs contain dynamic `network_edges[time,edge,endpoint]` and
+  elementary `edge_rewired` events; they do not contain community labels or
+  polarization answers.
 - The prompt receives no baseline numerical summary or evaluation information.
 - Model output is declarative JSON AST only; no generated code is evaluated.
 - All three independent generations, repairs, validation errors, and selection reasons are preserved.

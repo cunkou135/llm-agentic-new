@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0-preformal-scale-protocol",
   "master_seed": 20260901,
   "formal_run": true,
   "random_seeds": [1101, 1102, 1103, 1104, 1105, 1106, 1107, 1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1117, 1118, 1119, 1120, 1121, 1122, 1123, 1124],
@@ -65,10 +65,12 @@
   "scenarios": {
     "schelling": {
       "label": "Delayed spatial segregation",
-      "description": "Agents of two groups occupy a periodic grid and may relocate when local same-group similarity is below tolerance.",
+      "description": "Agents of two groups occupy a periodic grid partitioned into fixed public spatial districts and may relocate when local same-group similarity is below tolerance.",
       "num_agents": 720,
       "grid_width": 30,
       "grid_height": 30,
+      "district_rows": 3,
+      "district_columns": 3,
       "num_steps": 160,
       "baseline": {
         "tolerance": 0.55,
@@ -89,11 +91,13 @@
     },
     "deffuant": {
       "label": "Delayed networked bounded confidence dynamics",
-      "description": "Agents on a rewired degree-eight network assimilate when opinions are close and may move apart under sufficiently distant encounters.",
+      "description": "Agents on an initially rewired degree-eight network assimilate when opinions are close, may move apart under sufficiently distant encounters, and adapt rejected or backfire ties through fixed-probability rewiring.",
       "num_agents": 240,
       "num_steps": 120,
       "network_degree": 8,
       "network_rewire_probability": 0.08,
+      "adaptive_rewiring_probability": 0.15,
+      "rewiring_homophily_probability": 0.65,
       "baseline": {
         "confidence_bound": 0.35,
         "assimilation_strength": 0.25,

@@ -10,6 +10,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Scale = Literal["micro", "meso", "macro"]
 Direction = Literal["increase", "decrease", "mixed", "unknown"]
+EntityScope = Literal[
+    "individual",
+    "interaction",
+    "elementary_event",
+    "local_process",
+    "neighborhood",
+    "district",
+    "community",
+    "cluster",
+    "local_domain",
+    "whole_system",
+]
 
 
 class TemporalAggregationSpec(BaseModel):
@@ -17,14 +29,16 @@ class TemporalAggregationSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["identity", "rolling_mean", "difference", "cumulative_mean"]
+    op: Literal[
+        "identity", "rolling_mean", "rolling_std", "difference", "cumulative_mean"
+    ]
     window: int | None = None
 
     @model_validator(mode="after")
     def validate_window(self) -> "TemporalAggregationSpec":
-        if self.op == "rolling_mean":
+        if self.op in {"rolling_mean", "rolling_std"}:
             if self.window is None or isinstance(self.window, bool) or self.window <= 0:
-                raise ValueError("rolling_mean requires a positive integer window")
+                raise ValueError(f"{self.op} requires a positive integer window")
         elif self.window is not None:
             raise ValueError(f"{self.op} does not accept window")
         return self
@@ -48,6 +62,7 @@ class IndicatorSpec(BaseModel):
     phenomenon: str = Field(min_length=3)
     scale: Scale
     branch_id: str = Field(pattern=r"^[a-z][a-z0-9_]{1,31}$")
+    entity_scope: EntityScope
     entities: str = Field(min_length=2)
     source_fields: list[str] = Field(min_length=1)
     computation: dict[str, Any]

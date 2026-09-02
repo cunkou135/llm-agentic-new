@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -25,6 +26,8 @@ _REDUCERS = {
     "mean", "sum", "count", "fraction", "variance", "std", "quantile",
     "entropy", "binned_entropy",
 }
+_GROUP_REDUCERS = {"mean", "sum", "count", "fraction", "variance", "std", "entropy"}
+_NETWORK_REDUCERS = {"mean", "sum", "count", "fraction", "variance", "std"}
 _BINARY = {"add", "subtract", "multiply", "divide", "safe_ratio", "distance"}
 _UNARY = {"abs", "negate", "sqrt", "log1p"}
 _COMPARISONS = {"greater", "greater_equal", "less", "less_equal", "equal", "not_equal"}
@@ -35,14 +38,29 @@ _OPERATORS = {
     "where",
     "time_difference",
     "rolling_mean",
+    "rolling_std",
     "select",
+    "group_reduce",
     "connected_component_count",
     "largest_component_fraction",
     "spatial_neighbor_similarity",
     "network_assortativity",
     "network_density",
+    "network_neighborhood_reduce",
+    "network_component_count",
+    "network_largest_component_fraction",
 } | _REDUCERS | _BINARY | _UNARY | _COMPARISONS
 _OPERATORS.add("correlation")
+
+MESOSCOPIC_STRUCTURE_OPERATORS = frozenset(
+    {
+        "group_reduce",
+        "network_neighborhood_reduce",
+        "network_assortativity",
+        "network_component_count",
+        "network_largest_component_fraction",
+    }
+)
 
 
 def grammar_description() -> dict[str, Any]:
@@ -66,7 +84,7 @@ def grammar_description() -> dict[str, Any]:
             types["value"] = "finite number or boolean"
             example["value"] = 0.5
             output = "scalar"
-        elif op in _UNARY | {"clip", "time_difference", "rolling_mean"}:
+        elif op in _UNARY | {"clip", "time_difference", "rolling_mean", "rolling_std"}:
             required += ["input"]
             types["input"] = "AST object"
             example["input"] = {"op": "field", "name": "local_similarity"}
@@ -74,7 +92,7 @@ def grammar_description() -> dict[str, Any]:
                 required += ["minimum", "maximum"]
                 types.update({"minimum": "number", "maximum": "number"})
                 example.update({"minimum": 0.0, "maximum": 1.0})
-            if op == "rolling_mean":
+            if op in {"rolling_mean", "rolling_std"}:
                 required += ["window"]
                 types["window"] = "positive integer"
                 example["window"] = 3
@@ -115,6 +133,26 @@ def grammar_description() -> dict[str, Any]:
             types.update({"input": "AST object", "axis": "named input dimension", "index": "non-negative integer"})
             axis = "required; selected and removed from output"
             example.update({"input": {"op": "field", "name": "agent_position"}, "axis": "coordinate", "index": 0})
+        elif op == "group_reduce":
+            required += ["values", "groups", "axis", "reducer"]
+            types.update(
+                {
+                    "values": "numeric, integer, or boolean AST object",
+                    "groups": "integer group-membership AST object",
+                    "axis": "shared entity dimension",
+                    "reducer": f"one of {sorted(_GROUP_REDUCERS)}",
+                }
+            )
+            axis = "required entity axis; replaced by a generic group dimension"
+            example.update(
+                {
+                    "values": {"op": "field", "name": "agent_group"},
+                    "groups": {"op": "field", "name": "district_id"},
+                    "axis": "agent",
+                    "reducer": "mean",
+                }
+            )
+            output = "numeric dimensions with entity axis replaced by group"
         elif op == "correlation":
             required += ["left", "right", "axis"]
             types.update({"left": "numeric AST object", "right": "numeric AST object", "axis": "shared named dimension"})
@@ -127,14 +165,46 @@ def grammar_description() -> dict[str, Any]:
             output = "numeric [time]"
         elif op == "network_assortativity":
             required += ["values", "edges"]
-            types.update({"values": "numeric [time,agent] AST", "edges": "integer [edge,endpoint] AST"})
+            types.update({"values": "numeric [time,agent] AST", "edges": "integer [time,edge,endpoint] AST"})
             example.update({"values": {"op": "field", "name": "state_opinion"}, "edges": {"op": "field", "name": "network_edges"}})
             output = "numeric [time]"
         elif op == "network_density":
             required += ["edges", "node_count"]
-            types.update({"edges": "integer [edge,endpoint] AST", "node_count": "scalar AST"})
+            types.update({"edges": "integer [time,edge,endpoint] AST", "node_count": "scalar AST"})
             example.update({"edges": {"op": "field", "name": "network_edges"}, "node_count": {"op": "field", "name": "agent_count"}})
-            output = "numeric scalar"
+            output = "numeric [time] for dynamic edges"
+        elif op == "network_neighborhood_reduce":
+            required += ["values", "edges", "reducer"]
+            types.update(
+                {
+                    "values": "numeric, integer, or boolean [time,agent] AST",
+                    "edges": "integer [time,edge,endpoint] AST",
+                    "reducer": f"one of {sorted(_NETWORK_REDUCERS)}",
+                }
+            )
+            example.update(
+                {
+                    "values": {"op": "field", "name": "state_opinion"},
+                    "edges": {"op": "field", "name": "network_edges"},
+                    "reducer": "mean",
+                }
+            )
+            output = "numeric [time,agent] neighborhood statistic"
+        elif op in {"network_component_count", "network_largest_component_fraction"}:
+            required += ["edges", "node_count"]
+            types.update(
+                {
+                    "edges": "integer [time,edge,endpoint] AST",
+                    "node_count": "positive scalar AST",
+                }
+            )
+            example.update(
+                {
+                    "edges": {"op": "field", "name": "network_edges"},
+                    "node_count": {"op": "field", "name": "agent_count"},
+                }
+            )
+            output = "numeric [time]"
         contracts[op] = {
             "required": required,
             "optional": optional,
@@ -193,6 +263,98 @@ def computation_signature(expression: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def expression_operators(expression: dict[str, Any]) -> set[str]:
+    operators: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            if isinstance(value.get("op"), str):
+                operators.add(value["op"])
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+
+    visit(expression)
+    return operators
+
+
+def mesoscopic_structure_operators(expression: dict[str, Any]) -> set[str]:
+    return expression_operators(expression) & MESOSCOPIC_STRUCTURE_OPERATORS
+
+
+def _constant_node(value: Any) -> bool:
+    return isinstance(value, dict) and value.get("op") == "constant"
+
+
+def strip_trivial_wrappers(expression: dict[str, Any]) -> dict[str, Any]:
+    """Strip temporal and one-to-one mathematical wrappers from an AST lineage."""
+
+    node = expression
+    while isinstance(node, dict):
+        op = node.get("op")
+        if op in {
+            "time_difference",
+            "rolling_mean",
+            "rolling_std",
+            "negate",
+            "sqrt",
+            "log1p",
+            "clip",
+        }:
+            node = node.get("input")
+            continue
+        if op in {"add", "subtract", "multiply", "divide", "safe_ratio"}:
+            left, right = node.get("left"), node.get("right")
+            if _constant_node(left) and isinstance(right, dict):
+                node = right
+                continue
+            if _constant_node(right) and isinstance(left, dict):
+                node = left
+                continue
+        break
+    if not isinstance(node, dict):
+        return {"op": "invalid_lineage"}
+    return node
+
+
+def canonical_computational_lineage(
+    expression: dict[str, Any], temporal_aggregation: dict[str, Any]
+) -> str:
+    """Canonical core after removing scale-irrelevant temporal/math wrappers."""
+
+    aggregation_op = temporal_aggregation.get("op")
+    if aggregation_op not in {
+        "identity",
+        "rolling_mean",
+        "rolling_std",
+        "difference",
+        "cumulative_mean",
+    }:
+        raise DSLValidationError(f"unknown temporal lineage wrapper: {aggregation_op!r}")
+    return canonical_expression(strip_trivial_wrappers(expression))
+
+
+def is_trivial_cross_scale_transform(
+    source_expression: dict[str, Any],
+    source_aggregation: dict[str, Any],
+    target_expression: dict[str, Any],
+    target_aggregation: dict[str, Any],
+) -> bool:
+    source_core = canonical_computational_lineage(
+        source_expression, source_aggregation
+    )
+    target_core = canonical_computational_lineage(
+        target_expression, target_aggregation
+    )
+    if source_core != target_core:
+        return False
+    source_structure = mesoscopic_structure_operators(source_expression)
+    target_structure = mesoscopic_structure_operators(target_expression)
+    return not bool(target_structure - source_structure)
+
+
 def _same_or_scalar(left: ValueType, right: ValueType) -> tuple[str, ...]:
     if not left.dimensions:
         return right.dimensions
@@ -219,6 +381,10 @@ def validate_expression(expression: Any, fields: dict[str, ValueType]) -> ValueT
     if op == "constant":
         if not isinstance(expression.get("value"), (int, float, bool)):
             raise DSLValidationError("constant value must be numeric or boolean")
+        if not isinstance(expression["value"], bool) and not math.isfinite(
+            float(expression["value"])
+        ):
+            raise DSLValidationError("constant value must be finite")
         if isinstance(expression["value"], bool):
             dtype = "bool"
         elif isinstance(expression["value"], int):
@@ -278,6 +444,35 @@ def validate_expression(expression: Any, fields: dict[str, ValueType]) -> ValueT
             if isinstance(bins, bool) or not isinstance(bins, int) or not 2 <= bins <= 128:
                 raise DSLValidationError("binned_entropy bins must be an integer in [2, 128]")
         return ValueType("numeric", tuple(dimensions))
+    if op == "group_reduce":
+        values = validate_expression(expression.get("values"), fields)
+        groups = validate_expression(expression.get("groups"), fields)
+        axis = expression.get("axis")
+        reducer = expression.get("reducer")
+        if groups.dtype != "integer":
+            raise DSLValidationError("group_reduce groups must be integer labels")
+        if axis not in groups.dimensions or axis not in values.dimensions:
+            raise DSLValidationError("group_reduce axis must be present in values and groups")
+        broadcast_static_values = (
+            values.dimensions == (axis,)
+            and groups.dimensions == ("time", axis)
+        )
+        if values.dimensions != groups.dimensions and not broadcast_static_values:
+            raise DSLValidationError(
+                "group_reduce values and groups must share dimensions, except static entity values may broadcast over time"
+            )
+        if reducer not in _GROUP_REDUCERS:
+            raise DSLValidationError(f"illegal group_reduce reducer: {reducer!r}")
+        if reducer == "entropy" and values.dtype not in {"bool", "integer"}:
+            raise DSLValidationError("group_reduce entropy requires categorical values")
+        if reducer not in {"count", "fraction", "entropy"} and values.dtype not in {
+            "numeric", "integer"
+        }:
+            raise DSLValidationError(f"group_reduce {reducer} requires numeric values")
+        dimensions = list(groups.dimensions)
+        dimensions.remove(axis)
+        dimensions.append("group")
+        return ValueType("numeric", tuple(dimensions))
     if op == "clip":
         value = validate_expression(expression.get("input"), fields)
         if value.dtype not in {"numeric", "integer"}:
@@ -294,14 +489,14 @@ def validate_expression(expression: Any, fields: dict[str, ValueType]) -> ValueT
             raise DSLValidationError("where condition must be boolean")
         _same_or_scalar(condition, value)
         return value
-    if op in {"time_difference", "rolling_mean"}:
+    if op in {"time_difference", "rolling_mean", "rolling_std"}:
         value = validate_expression(expression.get("input"), fields)
         if value.dtype not in {"numeric", "integer"} or "time" not in value.dimensions:
             raise DSLValidationError(f"{op} requires numeric time-indexed input")
-        if op == "rolling_mean" and (
+        if op in {"rolling_mean", "rolling_std"} and (
             not isinstance(expression.get("window"), int) or expression["window"] < 1
         ):
-            raise DSLValidationError("rolling_mean window must be a positive integer")
+            raise DSLValidationError(f"{op} window must be a positive integer")
         return value
     if op == "select":
         value = validate_expression(expression.get("input"), fields)
@@ -327,17 +522,61 @@ def validate_expression(expression: Any, fields: dict[str, ValueType]) -> ValueT
     if op == "network_assortativity":
         values = validate_expression(expression.get("values"), fields)
         edges = validate_expression(expression.get("edges"), fields)
-        if values.dimensions != ("time", "agent") or edges.dimensions != ("edge", "endpoint"):
-            raise DSLValidationError("network_assortativity requires time-agent values and static edges")
+        if values.dimensions != ("time", "agent") or edges.dimensions not in {
+            ("edge", "endpoint"),
+            ("time", "edge", "endpoint"),
+        }:
+            raise DSLValidationError("network_assortativity requires time-agent values and valid edge lists")
         return ValueType("numeric", ("time",))
     if op == "network_density":
         edges = validate_expression(expression.get("edges"), fields)
-        if edges.dimensions != ("edge", "endpoint"):
-            raise DSLValidationError("network_density requires static edges")
+        if edges.dimensions not in {
+            ("edge", "endpoint"),
+            ("time", "edge", "endpoint"),
+        }:
+            raise DSLValidationError("network_density requires valid edge lists")
         if not isinstance(expression.get("node_count"), dict):
             raise DSLValidationError("network_density requires node_count expression")
-        validate_expression(expression["node_count"], fields)
-        return ValueType("numeric", ())
+        node_count = validate_expression(expression["node_count"], fields)
+        if node_count.dimensions:
+            raise DSLValidationError("network_density node_count must be scalar")
+        return ValueType(
+            "numeric", ("time",) if edges.dimensions[0] == "time" else ()
+        )
+    if op == "network_neighborhood_reduce":
+        values = validate_expression(expression.get("values"), fields)
+        edges = validate_expression(expression.get("edges"), fields)
+        reducer = expression.get("reducer")
+        if values.dimensions != ("time", "agent"):
+            raise DSLValidationError(
+                "network_neighborhood_reduce requires time-agent values"
+            )
+        if edges.dimensions not in {
+            ("edge", "endpoint"),
+            ("time", "edge", "endpoint"),
+        }:
+            raise DSLValidationError(
+                "network_neighborhood_reduce requires valid edge lists"
+            )
+        if reducer not in _NETWORK_REDUCERS:
+            raise DSLValidationError(
+                f"illegal network neighborhood reducer: {reducer!r}"
+            )
+        if reducer not in {"count", "fraction"} and values.dtype not in {
+            "numeric", "integer"
+        }:
+            raise DSLValidationError(
+                f"network neighborhood {reducer} requires numeric values"
+            )
+        return ValueType("numeric", ("time", "agent"))
+    if op in {"network_component_count", "network_largest_component_fraction"}:
+        edges = validate_expression(expression.get("edges"), fields)
+        node_count = validate_expression(expression.get("node_count"), fields)
+        if edges.dimensions != ("time", "edge", "endpoint"):
+            raise DSLValidationError(f"{op} requires dynamic time-indexed edges")
+        if node_count.dimensions or node_count.dtype not in {"integer", "numeric"}:
+            raise DSLValidationError(f"{op} node_count must be numeric scalar")
+        return ValueType("numeric", ("time",))
     raise DSLValidationError(f"unhandled operator: {op}")
 
 
@@ -358,8 +597,111 @@ def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     result = np.empty_like(values, dtype=float)
     for index in range(len(values)):
-        result[index] = np.nanmean(values[max(0, index - window + 1) : index + 1], axis=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            result[index] = np.nanmean(
+                values[max(0, index - window + 1) : index + 1], axis=0
+            )
     return result
+
+
+def _rolling_std(values: np.ndarray, window: int) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    result = np.empty_like(values, dtype=float)
+    for index in range(len(values)):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            result[index] = np.nanstd(
+                values[max(0, index - window + 1) : index + 1], axis=0
+            )
+    return result
+
+
+def _reduce_vector(values: np.ndarray, reducer: str) -> float:
+    array = np.asarray(values)
+    finite = np.isfinite(array)
+    usable = array[finite]
+    if reducer == "count":
+        return float(len(usable))
+    if not len(usable):
+        return float("nan")
+    if reducer == "mean":
+        return float(np.mean(usable))
+    if reducer == "sum":
+        return float(np.sum(usable))
+    if reducer == "fraction":
+        return float(np.mean(usable.astype(bool)))
+    if reducer == "variance":
+        return float(np.var(usable))
+    if reducer == "std":
+        return float(np.std(usable))
+    if reducer == "entropy":
+        _, counts = np.unique(usable, return_counts=True)
+        probabilities = counts / np.sum(counts)
+        return float(-np.sum(probabilities * np.log(probabilities + 1e-15)))
+    raise RuntimeError(f"unknown reducer reached runtime: {reducer}")
+
+
+def _group_reduce_runtime(
+    values: np.ndarray,
+    groups: np.ndarray,
+    values_type: ValueType,
+    groups_type: ValueType,
+    axis: str,
+    reducer: str,
+) -> np.ndarray:
+    values = np.asarray(values)
+    groups = np.asarray(groups)
+    if values_type.dimensions == (axis,) and groups_type.dimensions == ("time", axis):
+        values = np.broadcast_to(values[None, :], groups.shape)
+        values_type = ValueType(values_type.dtype, groups_type.dimensions)
+    value_axis = values_type.dimensions.index(axis)
+    group_axis = groups_type.dimensions.index(axis)
+    values = np.moveaxis(values, value_axis, -1)
+    groups = np.moveaxis(groups, group_axis, -1)
+    if values.shape != groups.shape:
+        raise DSLValidationError(
+            f"group_reduce runtime shape mismatch: {values.shape} versus {groups.shape}"
+        )
+    finite_groups = np.isfinite(groups) & (groups >= 0)
+    group_count = (
+        int(np.max(groups[finite_groups])) + 1 if np.any(finite_groups) else 1
+    )
+    output = np.full(values.shape[:-1] + (group_count,), np.nan, dtype=float)
+    for index in np.ndindex(values.shape[:-1]):
+        row_groups = groups[index]
+        row_values = values[index]
+        for group_id in range(group_count):
+            mask = np.isfinite(row_groups) & (row_groups == group_id)
+            output[index + (group_id,)] = _reduce_vector(
+                row_values[mask], reducer
+            )
+    return output
+
+
+def _validated_edges(edges: np.ndarray, node_count: int) -> np.ndarray:
+    array = np.asarray(edges)
+    if array.ndim != 2 or array.shape[1:] != (2,):
+        raise DSLValidationError(
+            f"network edge slice must have shape [edge,2], got {array.shape}"
+        )
+    if not np.isfinite(array).all():
+        raise DSLValidationError("network edges contain non-finite endpoints")
+    array = array.astype(np.int64)
+    if np.any(array < 0) or np.any(array >= node_count):
+        raise DSLValidationError("network edge endpoint is outside the node range")
+    if np.any(array[:, 0] == array[:, 1]):
+        raise DSLValidationError("network edges contain a self-loop")
+    canonical = np.sort(array, axis=1)
+    if len({tuple(item) for item in canonical}) != len(canonical):
+        raise DSLValidationError("network edges contain a duplicate undirected edge")
+    return canonical
+
+
+def _edge_slice(edges: np.ndarray, time: int, node_count: int) -> np.ndarray:
+    array = np.asarray(edges)
+    current = array if array.ndim == 2 else array[time]
+    return _validated_edges(current, node_count)
 
 
 def _component_stats(grid: np.ndarray) -> tuple[float, float]:
@@ -469,7 +811,9 @@ def execute_expression(
             values = run(node["input"])
             axis = _axis_index(node, types)
             if op == "mean":
-                return np.nanmean(values, axis=axis)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    return np.nanmean(values, axis=axis)
             if op == "sum":
                 return np.nansum(values, axis=axis)
             if op == "count":
@@ -482,11 +826,17 @@ def execute_expression(
             if op == "fraction":
                 return np.nanmean(np.asarray(values, dtype=float), axis=axis)
             if op == "variance":
-                return np.nanvar(values, axis=axis)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    return np.nanvar(values, axis=axis)
             if op == "std":
-                return np.nanstd(values, axis=axis)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    return np.nanstd(values, axis=axis)
             if op == "quantile":
-                return np.nanquantile(values, float(node["q"]), axis=axis)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    return np.nanquantile(values, float(node["q"]), axis=axis)
             if op == "entropy":
                 array = np.asarray(values)
                 moved = np.moveaxis(array, axis, -1)
@@ -511,6 +861,17 @@ def execute_expression(
                     probabilities = counts[counts > 0] / np.sum(counts)
                     output[index] = -np.sum(probabilities * np.log(probabilities))
                 return output
+        if op == "group_reduce":
+            values_type = validate_expression(node["values"], types)
+            groups_type = validate_expression(node["groups"], types)
+            return _group_reduce_runtime(
+                run(node["values"]),
+                run(node["groups"]),
+                values_type,
+                groups_type,
+                str(node["axis"]),
+                str(node["reducer"]),
+            )
         if op == "clip":
             return np.clip(run(node["input"]), float(node["minimum"]), float(node["maximum"]))
         if op == "where":
@@ -520,6 +881,8 @@ def execute_expression(
             return np.diff(values, axis=0, prepend=values[[0]])
         if op == "rolling_mean":
             return _rolling_mean(run(node["input"]), int(node["window"]))
+        if op == "rolling_std":
+            return _rolling_std(run(node["input"]), int(node["window"]))
         if op == "select":
             value = run(node["input"])
             value_type = validate_expression(node["input"], types)
@@ -533,13 +896,15 @@ def execute_expression(
             return np.asarray([_spatial_similarity(grid) for grid in run(node["input"])])
         if op == "network_assortativity":
             values = np.asarray(run(node["values"]), dtype=float)
-            edges = np.asarray(run(node["edges"]), dtype=int)
+            edges = np.asarray(run(node["edges"]))
             result = []
-            for row in values:
+            for time, row in enumerate(values):
+                current_edges = _edge_slice(edges, time, len(row))
                 # The simulator graph is undirected.  Include both orientations
                 # so the statistic cannot depend on the stored min/max node-id
                 # ordering of an edge.
-                forward_left, forward_right = row[edges[:, 0]], row[edges[:, 1]]
+                forward_left = row[current_edges[:, 0]]
+                forward_right = row[current_edges[:, 1]]
                 left = np.concatenate([forward_left, forward_right])
                 right = np.concatenate([forward_right, forward_left])
                 finite = np.isfinite(left) & np.isfinite(right)
@@ -557,7 +922,52 @@ def execute_expression(
         if op == "network_density":
             edges = np.asarray(run(node["edges"]))
             n = int(np.ravel(run(node["node_count"]))[0])
-            return np.asarray(2 * len(edges) / max(n * (n - 1), 1))
+            if n <= 0:
+                raise DSLValidationError("network node_count must be positive")
+            if edges.ndim == 2:
+                current = _validated_edges(edges, n)
+                return np.asarray(2 * len(current) / max(n * (n - 1), 1))
+            return np.asarray(
+                [
+                    2 * len(_edge_slice(edges, time, n)) / max(n * (n - 1), 1)
+                    for time in range(len(edges))
+                ],
+                dtype=float,
+            )
+        if op == "network_neighborhood_reduce":
+            values = np.asarray(run(node["values"]))
+            edges = np.asarray(run(node["edges"]))
+            reducer = str(node["reducer"])
+            result = np.full(values.shape, np.nan, dtype=float)
+            for time, row in enumerate(values):
+                current_edges = _edge_slice(edges, time, len(row))
+                neighbours: list[list[int]] = [[] for _ in range(len(row))]
+                for left, right in current_edges:
+                    neighbours[int(left)].append(int(right))
+                    neighbours[int(right)].append(int(left))
+                for agent, connected in enumerate(neighbours):
+                    result[time, agent] = _reduce_vector(
+                        row[np.asarray(connected, dtype=int)], reducer
+                    )
+            return result
+        if op in {"network_component_count", "network_largest_component_fraction"}:
+            edges = np.asarray(run(node["edges"]))
+            n = int(np.ravel(run(node["node_count"]))[0])
+            if n <= 0:
+                raise DSLValidationError("network node_count must be positive")
+            result = []
+            for time in range(len(edges)):
+                current_edges = _edge_slice(edges, time, n)
+                graph = nx.Graph()
+                graph.add_nodes_from(range(n))
+                graph.add_edges_from((int(left), int(right)) for left, right in current_edges)
+                components = list(nx.connected_components(graph))
+                if op == "network_component_count":
+                    result.append(float(len(components)))
+                else:
+                    largest = max((len(component) for component in components), default=0)
+                    result.append(float(largest / n))
+            return np.asarray(result, dtype=float)
         raise RuntimeError(f"unsupported operator reached executor: {op}")
 
     return np.asarray(run(expression), dtype=float)
@@ -566,17 +976,23 @@ def execute_expression(
 def validate_temporal_aggregation(aggregation: dict[str, Any]) -> None:
     if not isinstance(aggregation, dict):
         raise DSLValidationError("temporal aggregation must be an object")
-    allowed = {"identity", "rolling_mean", "difference", "cumulative_mean"}
+    allowed = {
+        "identity", "rolling_mean", "rolling_std", "difference", "cumulative_mean"
+    }
     op = aggregation.get("op")
     if op not in allowed:
         raise DSLValidationError(f"illegal temporal aggregation: {op!r}")
-    extra = set(aggregation) - ({"op", "window"} if op == "rolling_mean" else {"op"})
+    extra = set(aggregation) - (
+        {"op", "window"} if op in {"rolling_mean", "rolling_std"} else {"op"}
+    )
     if extra:
         raise DSLValidationError(f"unexpected temporal aggregation fields: {sorted(extra)}")
-    if op == "rolling_mean":
+    if op in {"rolling_mean", "rolling_std"}:
         window = aggregation.get("window")
         if isinstance(window, bool) or not isinstance(window, int) or window < 1:
-            raise DSLValidationError("temporal rolling_mean requires a positive integer window")
+            raise DSLValidationError(
+                f"temporal {op} requires a positive integer window"
+            )
 
 
 def apply_temporal_aggregation(values: np.ndarray, aggregation: dict[str, Any]) -> np.ndarray:
@@ -590,6 +1006,11 @@ def apply_temporal_aggregation(values: np.ndarray, aggregation: dict[str, Any]) 
         if not isinstance(window, int) or window < 1:
             raise DSLValidationError("temporal rolling_mean requires a positive window")
         return _rolling_mean(values, window)
+    if op == "rolling_std":
+        window = aggregation.get("window")
+        if not isinstance(window, int) or window < 1:
+            raise DSLValidationError("temporal rolling_std requires a positive window")
+        return _rolling_std(values, window)
     if op == "difference":
         return np.diff(values, prepend=values[0])
     if op == "cumulative_mean":
@@ -602,12 +1023,14 @@ def compute_indicator(
     aggregation: dict[str, Any],
     raw: dict[str, np.ndarray],
     schema: Iterable[dict[str, Any]],
+    *,
+    allow_all_nan: bool = False,
 ) -> np.ndarray:
     validate_indicator_expression(expression, schema)
     values = execute_expression(expression, raw, schema)
     values = apply_temporal_aggregation(values, aggregation)
     if values.ndim != 1:
         raise DSLValidationError(f"indicator execution returned shape {values.shape}, expected one dimension")
-    if not np.isfinite(values).any():
+    if not allow_all_nan and not np.isfinite(values).any():
         raise DSLValidationError("indicator execution returned no finite values")
     return values

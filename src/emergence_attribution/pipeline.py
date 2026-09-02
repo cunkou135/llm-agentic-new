@@ -66,24 +66,47 @@ def load_experiment_config(path: Path) -> dict[str, Any]:
         raise ValueError("maximum candidate edge count is below the minimum")
     if bool(config.get("formal_run", True)):
         intervention = config["intervention"]
-        frozen_values = {
+        frozen_intervention = {
+            "bootstrap_repetitions": 500,
+            "confidence_level": 0.95,
             "onset_detection_start": 0,
             "minimum_standardised_effect": 0.10,
             "onset_consecutive_steps": 4,
             "evaluation_start": 15,
+            "terminal_window": 24,
             "lag_tolerance": 2,
         }
-        for key, expected in frozen_values.items():
+        for key, expected in frozen_intervention.items():
             if intervention.get(key) != expected:
                 raise ValueError(f"formal intervention setting {key} must equal {expected}")
+        frozen_temporal = {
+            "maximum_lag": 5,
+            "parent_alpha": 0.10,
+            "fdr_alpha": 0.05,
+            "bootstrap_repetitions": 100,
+            "support_threshold": 0.65,
+        }
+        for key, expected in frozen_temporal.items():
+            if config["temporal"].get(key) != expected:
+                raise ValueError(f"formal temporal setting {key} must equal {expected}")
+        frozen_representation = {
+            "independent_generations": 3,
+            "maximum_repair_rounds": 3,
+            "required_branch_count": 4,
+            "minimum_candidate_edges": 28,
+            "maximum_candidate_edges": 48,
+        }
+        for key, expected in frozen_representation.items():
+            if representation.get(key) != expected:
+                raise ValueError(
+                    f"formal representation capacity {key} must equal {expected}"
+                )
+        if representation.get("budget") != {"micro": 16, "meso": 8, "macro": 4}:
+            raise ValueError(
+                "formal representation capacity must be 16 Micro, 8 Meso, and 4 Macro"
+            )
         if len(config["random_seeds"]) != 24:
             raise ValueError("formal runs require exactly 24 random seeds")
-        if config["temporal"].get("maximum_lag") != 5:
-            raise ValueError("formal candidate lags must be exactly 1 through 5")
-        if config["temporal"].get("bootstrap_repetitions") != 100:
-            raise ValueError("formal trajectory bootstrap repetitions must be 100")
-        if intervention.get("bootstrap_repetitions") != 500:
-            raise ValueError("formal paired bootstrap repetitions must be 500")
     return config
 
 

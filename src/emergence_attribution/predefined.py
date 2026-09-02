@@ -15,43 +15,112 @@ def _reduce(op: str, name: str, axis: str = "agent", **extra: Any) -> dict[str, 
     return {"op": op, "input": _field(name), "axis": axis, **extra}
 
 
-def _micro_expressions(scenario: str) -> list[tuple[str, str, dict[str, Any]]]:
+def _group_stat(
+    value: dict[str, Any], reducer: str, across: str = "variance"
+) -> dict[str, Any]:
+    grouped = {
+        "op": "group_reduce",
+        "values": value,
+        "groups": _field("district_id"),
+        "axis": "agent",
+        "reducer": reducer,
+    }
+    return {"op": across, "input": grouped, "axis": "group"}
+
+
+def _network_neighborhood(value: dict[str, Any], reducer: str) -> dict[str, Any]:
+    return {
+        "op": "network_neighborhood_reduce",
+        "values": value,
+        "edges": _field("network_edges"),
+        "reducer": reducer,
+    }
+
+
+def _micro_expressions(
+    scenario: str,
+) -> list[tuple[str, str, str, dict[str, Any]]]:
     if scenario == "schelling":
         return [
-            ("unsatisfied fraction", "fraction of agents below the satisfaction threshold", _reduce("fraction", "unhappy")),
-            ("relocation fraction", "fraction of agents relocating in a step", _reduce("fraction", "moved")),
-            ("boundary fraction", "fraction of agents adjacent to another group", _reduce("fraction", "boundary_agent")),
-            ("mean local similarity", "mean same-group neighbourhood share", _reduce("mean", "local_similarity")),
-            ("similarity dispersion", "standard deviation of local similarity", _reduce("std", "local_similarity")),
-            ("lower similarity quantile", "lower quartile of local similarity", _reduce("quantile", "local_similarity", q=0.25)),
-            ("upper similarity quantile", "upper quartile of local similarity", _reduce("quantile", "local_similarity", q=0.75)),
-            ("mean neighbour count", "mean occupied-neighbour count", _reduce("mean", "neighbour_count")),
-            ("neighbour-count dispersion", "standard deviation of occupied-neighbour count", _reduce("std", "neighbour_count")),
-            ("mean relocation distance", "mean normalised relocation distance", _reduce("mean", "move_distance")),
-            ("upper relocation distance", "upper decile relocation distance", _reduce("quantile", "move_distance", q=0.90)),
-            ("mean destination similarity", "mean destination same-group fraction", _reduce("mean", "destination_similarity")),
-            ("destination-similarity dispersion", "dispersion of destination similarity", _reduce("std", "destination_similarity")),
-            ("spatial component count", "number of periodic same-group components", {"op": "connected_component_count", "input": _field("state_grid")}),
-            ("largest component fraction", "fraction in the largest same-group component", {"op": "largest_component_fraction", "input": _field("state_grid")}),
-            ("neighbour spatial agreement", "same-group agreement across periodic cell adjacencies", {"op": "spatial_neighbor_similarity", "input": _field("state_grid")}),
+            ("unsatisfied event prevalence", "prevalence of individual dissatisfaction events", "elementary_event", _reduce("fraction", "unhappy")),
+            ("relocation event prevalence", "prevalence of individual relocation events", "elementary_event", _reduce("fraction", "moved")),
+            ("boundary exposure prevalence", "prevalence of individual cross-group boundary exposure", "local_process", _reduce("fraction", "boundary_agent")),
+            ("mean local exposure", "mean individual same-group Moore-neighborhood exposure", "local_process", _reduce("mean", "local_similarity")),
+            ("local exposure dispersion", "dispersion of individual local exposure", "local_process", _reduce("std", "local_similarity")),
+            ("lower local exposure", "lower quartile of individual local exposure", "local_process", _reduce("quantile", "local_similarity", q=0.25)),
+            ("upper local exposure", "upper quartile of individual local exposure", "local_process", _reduce("quantile", "local_similarity", q=0.75)),
+            ("mean occupied neighborhood", "mean local occupied-neighbor count per agent", "local_process", _reduce("mean", "neighbour_count")),
+            ("sparse-neighborhood prevalence", "prevalence of agents with at most two occupied neighbors", "local_process", {"op": "fraction", "input": {"op": "less_equal", "left": _field("neighbour_count"), "right": {"op": "constant", "value": 2}}, "axis": "agent"}),
+            ("mean relocation distance", "mean distance of individual relocation events including zero for no move", "elementary_event", _reduce("mean", "move_distance")),
+            ("upper relocation distance", "upper decile of individual relocation distance", "elementary_event", _reduce("quantile", "move_distance", q=0.90)),
+            ("mean destination outcome", "mean local similarity outcome of individual destination choices", "elementary_event", _reduce("mean", "destination_similarity")),
+            ("destination outcome dispersion", "dispersion of individual destination-choice outcomes", "elementary_event", _reduce("std", "destination_similarity")),
+            ("long-move prevalence", "prevalence of individual relocations longer than one quarter of maximum periodic distance", "elementary_event", {"op": "fraction", "input": {"op": "greater", "left": _field("move_distance"), "right": {"op": "constant", "value": 0.25}}, "axis": "agent"}),
+            ("high-similarity destination prevalence", "prevalence of destination choices with high same-group exposure", "elementary_event", {"op": "fraction", "input": {"op": "greater_equal", "left": _field("destination_similarity"), "right": {"op": "constant", "value": 0.75}}, "axis": "agent"}),
+            ("isolated-agent prevalence", "prevalence of individual agents with no occupied Moore neighbor", "local_process", {"op": "fraction", "input": {"op": "equal", "left": _field("neighbour_count"), "right": {"op": "constant", "value": 0}}, "axis": "agent"}),
         ]
     return [
-        ("accepted interaction fraction", "fraction of interactions that assimilate", _reduce("fraction", "interaction_accepted")),
-        ("repulsive interaction fraction", "fraction of interactions that produce repulsion", _reduce("fraction", "interaction_backfire")),
-        ("rejected interaction fraction", "fraction of interactions without an update", _reduce("fraction", "interaction_rejected")),
-        ("sign-flip fraction", "fraction of agents crossing opinion zero", _reduce("fraction", "sign_flip")),
-        ("mean opinion", "population mean opinion", _reduce("mean", "state_opinion")),
-        ("opinion dispersion", "population opinion standard deviation", _reduce("std", "state_opinion")),
-        ("lower opinion quantile", "lower opinion quartile", _reduce("quantile", "state_opinion", q=0.25)),
-        ("upper opinion quantile", "upper opinion quartile", _reduce("quantile", "state_opinion", q=0.75)),
-        ("mean absolute opinion", "mean opinion extremity", {"op": "mean", "input": {"op": "abs", "input": _field("state_opinion")}, "axis": "agent"}),
-        ("upper absolute opinion", "upper decile opinion extremity", {"op": "quantile", "input": {"op": "abs", "input": _field("state_opinion")}, "axis": "agent", "q": 0.90}),
-        ("mean interaction distance", "mean sampled opinion distance", _reduce("mean", "interaction_distance")),
-        ("mean absolute update", "mean absolute signed opinion update", {"op": "mean", "input": {"op": "abs", "input": _field("agent_shift")}, "axis": "agent"}),
-        ("update dispersion", "standard deviation of signed opinion updates", _reduce("std", "agent_shift")),
-        ("upper interaction distance", "upper decile sampled opinion distance", _reduce("quantile", "interaction_distance", q=0.90)),
-        ("network opinion assortativity", "correlation of endpoint opinions", {"op": "network_assortativity", "values": _field("state_opinion"), "edges": _field("network_edges")}),
-        ("opinion variance", "population opinion variance", _reduce("variance", "state_opinion")),
+        ("accepted encounter prevalence", "prevalence of pairwise assimilation encounters", "interaction", _reduce("fraction", "interaction_accepted")),
+        ("backfire encounter prevalence", "prevalence of pairwise repulsive-update encounters", "interaction", _reduce("fraction", "interaction_backfire")),
+        ("rejected encounter prevalence", "prevalence of pairwise no-update encounters", "interaction", _reduce("fraction", "interaction_rejected")),
+        ("rewired encounter prevalence", "prevalence of focal interaction ties successfully replaced", "elementary_event", _reduce("fraction", "edge_rewired")),
+        ("mean encounter distance", "mean opinion distance in pairwise encounters", "interaction", _reduce("mean", "interaction_distance")),
+        ("upper encounter distance", "upper decile of pairwise opinion distance", "interaction", _reduce("quantile", "interaction_distance", q=0.90)),
+        ("mean update magnitude", "mean magnitude of individual elementary opinion updates", "elementary_event", {"op": "mean", "input": {"op": "abs", "input": _field("agent_shift")}, "axis": "agent"}),
+        ("update dispersion", "dispersion of individual signed opinion updates", "elementary_event", _reduce("std", "agent_shift")),
+        ("sign-crossing prevalence", "prevalence of individual updates crossing opinion zero", "elementary_event", _reduce("fraction", "sign_flip")),
+        ("extreme-state prevalence", "prevalence of individual agents with absolute opinion at least 0.75", "individual", {"op": "fraction", "input": {"op": "greater_equal", "left": {"op": "abs", "input": _field("state_opinion")}, "right": {"op": "constant", "value": 0.75}}, "axis": "agent"}),
+        ("mean individual extremity", "mean absolute individual opinion state", "individual", {"op": "mean", "input": {"op": "abs", "input": _field("state_opinion")}, "axis": "agent"}),
+        ("positive-state prevalence", "prevalence of individual agents with positive opinion", "individual", {"op": "fraction", "input": {"op": "greater", "left": _field("state_opinion"), "right": {"op": "constant", "value": 0.0}}, "axis": "agent"}),
+        ("large-update prevalence", "prevalence of elementary opinion updates exceeding 0.05 in magnitude", "elementary_event", {"op": "fraction", "input": {"op": "greater", "left": {"op": "abs", "input": _field("agent_shift")}, "right": {"op": "constant", "value": 0.05}}, "axis": "agent"}),
+        ("mean accepted distance", "mean pairwise distance among accepted encounters", "interaction", {"op": "mean", "input": {"op": "where", "condition": _field("interaction_accepted"), "input": _field("interaction_distance")}, "axis": "agent"}),
+        ("mean backfire distance", "mean pairwise distance among backfire encounters", "interaction", {"op": "mean", "input": {"op": "where", "condition": _field("interaction_backfire"), "input": _field("interaction_distance")}, "axis": "agent"}),
+        ("lower encounter distance", "lower quartile of pairwise opinion distance", "interaction", _reduce("quantile", "interaction_distance", q=0.25)),
+    ]
+
+
+def _meso_expressions(
+    scenario: str,
+) -> list[tuple[str, str, str, dict[str, Any]]]:
+    if scenario == "schelling":
+        return [
+            ("district composition heterogeneity", "between-district variance in group composition", "district", _group_stat(_field("agent_group"), "mean")),
+            ("district composition diversity", "mean within-district group-label entropy", "district", _group_stat(_field("agent_group"), "entropy", across="mean")),
+            ("district dissatisfaction heterogeneity", "between-district variance in dissatisfaction prevalence", "district", _group_stat(_field("unhappy"), "fraction")),
+            ("district turnover heterogeneity", "between-district variance in relocation-event prevalence", "district", _group_stat(_field("moved"), "fraction")),
+            ("district turnover level", "mean district-level relocation-event prevalence", "district", _group_stat(_field("moved"), "fraction", across="mean")),
+            ("district boundary heterogeneity", "between-district variance in boundary exposure prevalence", "district", _group_stat(_field("boundary_agent"), "fraction")),
+            ("district destination heterogeneity", "between-district variance in destination-choice outcome", "district", _group_stat(_field("destination_similarity"), "mean")),
+            ("district mobility-distance heterogeneity", "between-district variance in mean relocation distance", "district", _group_stat(_field("move_distance"), "mean")),
+        ]
+    neighborhood_mean = _network_neighborhood(_field("state_opinion"), "mean")
+    return [
+        ("neighborhood opinion mismatch", "mean absolute difference between each opinion and its network-neighborhood mean", "neighborhood", {"op": "mean", "input": {"op": "distance", "left": _field("state_opinion"), "right": neighborhood_mean}, "axis": "agent"}),
+        ("neighborhood mean separation", "variance across agents in network-neighborhood mean opinion", "neighborhood", {"op": "variance", "input": neighborhood_mean, "axis": "agent"}),
+        ("neighborhood opinion dispersion", "mean within-network-neighborhood opinion standard deviation", "neighborhood", {"op": "mean", "input": _network_neighborhood(_field("state_opinion"), "std"), "axis": "agent"}),
+        ("network endpoint assortativity", "opinion correlation across current undirected network endpoints", "community", {"op": "network_assortativity", "values": _field("state_opinion"), "edges": _field("network_edges")}),
+        ("network component organization", "number of connected components in the current adaptive network", "community", {"op": "network_component_count", "edges": _field("network_edges"), "node_count": _field("agent_count")}),
+        ("largest network domain", "fraction of agents in the largest connected network domain", "local_domain", {"op": "network_largest_component_fraction", "edges": _field("network_edges"), "node_count": _field("agent_count")}),
+        ("neighborhood acceptance heterogeneity", "variance across agents in neighborhood acceptance prevalence", "neighborhood", {"op": "variance", "input": _network_neighborhood(_field("interaction_accepted"), "fraction"), "axis": "agent"}),
+        ("neighborhood rewiring heterogeneity", "variance across agents in neighborhood rewiring-event prevalence", "neighborhood", {"op": "variance", "input": _network_neighborhood(_field("edge_rewired"), "fraction"), "axis": "agent"}),
+    ]
+
+
+def _macro_expressions(
+    scenario: str,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    if scenario == "schelling":
+        return [
+            ("whole-grid segregation", "whole-grid fraction belonging to the largest periodic same-group domain", {"op": "largest_component_fraction", "input": _field("state_grid")}),
+            ("city-wide mobility", "short-window whole-grid prevalence of relocation events", {"op": "rolling_mean", "input": _reduce("fraction", "moved"), "window": 3}),
+            ("global spatial fragmentation", "whole-grid count of periodic same-group components", {"op": "connected_component_count", "input": _field("state_grid")}),
+            ("global spatial agreement", "whole-grid same-group agreement across periodic cell adjacencies", {"op": "spatial_neighbor_similarity", "input": _field("state_grid")}),
+        ]
+    return [
+        ("whole-network opinion dispersion", "whole-system standard deviation of opinions", _reduce("std", "state_opinion")),
+        ("whole-network opinion center", "whole-system mean signed opinion", _reduce("mean", "state_opinion")),
+        ("persistent whole-network polarization", "short-window whole-system prevalence of absolute opinions at least 0.75", {"op": "rolling_mean", "input": {"op": "fraction", "input": {"op": "greater_equal", "left": {"op": "abs", "input": _field("state_opinion")}, "right": {"op": "constant", "value": 0.75}}, "axis": "agent"}, "window": 3}),
+        ("whole-network opinion entropy", "whole-system binned entropy of the opinion distribution", {"op": "binned_entropy", "input": _field("state_opinion"), "axis": "agent", "bins": 10}),
     ]
 
 
@@ -59,12 +128,12 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
     prefix = "sfix" if scenario == "schelling" else "dfix"
     micro = _micro_expressions(scenario)
     parameters = (
-        {0: "tolerance", 4: "move_probability", 11: "destination_preference"}
+        {0: "tolerance", 1: "move_probability", 11: "destination_preference"}
         if scenario == "schelling"
-        else {0: "confidence_bound", 11: "assimilation_strength", 1: "backfire_threshold"}
+        else {0: "confidence_bound", 6: "assimilation_strength", 1: "backfire_threshold"}
     )
     indicators: list[dict[str, Any]] = []
-    for index, (name, definition, expression) in enumerate(micro):
+    for index, (name, definition, entity_scope, expression) in enumerate(micro):
         associations = []
         if index in parameters:
             associations.append(
@@ -83,7 +152,8 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                 "phenomenon": "fixed observable comparator",
                 "scale": "micro",
                 "branch_id": f"branch_{index // 4}",
-                "entities": "agent interactions or local states",
+                "entity_scope": entity_scope,
+                "entities": "individual agent interactions, events, or local primitive states",
                 "source_fields": sorted(expression_fields(expression)),
                 "computation": expression,
                 "temporal_aggregation": {"op": "identity"},
@@ -91,22 +161,19 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                 "scientific_rationale": "Predefined only for the fixed-observable ablation comparator.",
             }
         )
-    for index in range(8):
-        base = micro[(2 * index) % len(micro)][2]
-        expression = {
-            "op": "rolling_mean",
-            "input": base,
-            "window": 3 + 2 * (index % 2),
-        }
+    for index, (name, definition, entity_scope, expression) in enumerate(
+        _meso_expressions(scenario)
+    ):
         indicators.append(
             {
                 "id": f"{prefix}_meso_{index:02d}",
-                "semantic_name": f"fixed intermediate organisation {index + 1}",
-                "scientific_definition": "A documented intermediate organisation summary for ablation.",
+                "semantic_name": name,
+                "scientific_definition": definition,
                 "phenomenon": "fixed observable comparator",
                 "scale": "meso",
                 "branch_id": f"branch_{index // 2}",
-                "entities": "public simulator states and interaction logs",
+                "entity_scope": entity_scope,
+                "entities": "public district, network-neighborhood, or community organization",
                 "source_fields": sorted(expression_fields(expression)),
                 "computation": expression,
                 "temporal_aggregation": {"op": "identity"},
@@ -114,20 +181,22 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                 "scientific_rationale": "Predefined only for the fixed-observable ablation comparator.",
             }
         )
-    for index in range(4):
-        expression = {"op": "time_difference", "input": micro[12 + index][2]}
+    for index, (name, definition, expression) in enumerate(
+        _macro_expressions(scenario)
+    ):
         indicators.append(
             {
                 "id": f"{prefix}_macro_{index:02d}",
-                "semantic_name": f"fixed collective outcome {index + 1}",
-                "scientific_definition": "A documented collective state summary for ablation.",
+                "semantic_name": name,
+                "scientific_definition": definition,
                 "phenomenon": "fixed observable comparator",
                 "scale": "macro",
                 "branch_id": f"branch_{index}",
+                "entity_scope": "whole_system",
                 "entities": "public system-level simulator summary",
                 "source_fields": sorted(expression_fields(expression)),
                 "computation": expression,
-                "temporal_aggregation": {"op": "cumulative_mean"},
+                "temporal_aggregation": {"op": "identity"},
                 "parameter_associations": [],
                 "scientific_rationale": "Predefined only for the fixed-observable ablation comparator.",
             }

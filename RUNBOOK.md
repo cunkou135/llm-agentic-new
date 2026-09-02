@@ -30,13 +30,18 @@ Copy-Item config\llm_api.example.json config\llm_api.local.json
 
 ## 第二步：执行正式实验（唯一推荐命令）
 
+`res1` 是旧尺度合同下的 development/pilot evidence，必须保留但不得 resume、
+复制或与新协议结果拼接。新协议必须从 semantic stage 开始，并使用从未出现过的
+run-id。下面以 `formal_scale_v2_001` 为例；若该目录已经存在，请换另一个全新 ID，
+不要覆盖。
+
 该命令按冻结顺序一次完成语义、两段仿真、分析、导出与 Figure 2--8 渲染：
 
 ```powershell
 .\.venv\Scripts\python run_experiment.py `
   --config config\experiment.json `
   --llm-config config\llm_api.local.json `
-  --run-id rerun_001 `
+  --run-id formal_scale_v2_001 `
   --workers auto `
   --plot-repo "..\llm-agentic-dis"
 ```
@@ -52,14 +57,14 @@ semantic -> baseline_simulation -> temporal -> intervention_simulation -> interv
 用于故障恢复的分阶段命令如下；正常首次运行不要使用这些命令：
 
 ```powershell
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage semantic
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage baseline_simulation --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage temporal --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage intervention_simulation --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage intervention --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage prospective --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage robustness --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id rerun_001 --workers auto --stage export --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage semantic
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage baseline_simulation --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage temporal --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage intervention_simulation --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage intervention --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage prospective --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage robustness --resume
+.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage export --resume
 ```
 
 ## 第三步：查看实时进度
@@ -69,7 +74,7 @@ semantic -> baseline_simulation -> temporal -> intervention_simulation -> interv
 持久进度日志位于：
 
 ```text
-runs\rerun_001\logs\progress.jsonl
+runs\formal_scale_v2_001\logs\progress.jsonl
 ```
 
 即使进程异常退出，该 JSONL 也保留最后完成的位置。
@@ -82,7 +87,7 @@ runs\rerun_001\logs\progress.jsonl
 .\.venv\Scripts\python run_experiment.py `
   --config config\experiment.json `
   --llm-config config\llm_api.local.json `
-  --run-id rerun_001 `
+  --run-id formal_scale_v2_001 `
   --workers auto `
   --resume `
   --plot-repo "..\llm-agentic-dis"
@@ -95,6 +100,17 @@ prompt/request/response/accepted payload/result 的哈希，然后跳过该 gene
 request/response 不会被静默覆盖。
 
 ## Stage 3 与指标口径
+
+- 16/8/4、四 branches、28--48 edges、三次独立生成与最多三轮 repair 是本次
+  实验冻结的 representation capacity control，不是方法理论上的固定节点数。
+- Micro 必须对应 individual/interaction/elementary/local primitive；Meso 必须
+  实际使用 district/group/neighborhood/community/local-domain 结构算子；Macro
+  的 `entity_scope` 必须为 `whole_system`。
+- rolling mean/std、difference、单调 clip、常数加减乘除等包装在 canonical
+  lineage 中会被剥离；若跨尺度两端核心计算相同且目标没有引入新中尺度结构，
+  candidate edge 以 `trivial_cross_scale_transform` 拒绝。
+- 干预或 mechanism-disabled 条件若真实消除了某类事件，条件事件指标允许保存
+  NaN 并在 Stage 3 判为 inconclusive；baseline 全 NaN 仍然 fail closed。
 
 - Micro->Meso 使用 direct Micro manipulation root，范围标记为 `direct_root`。
 - Meso->Macro 沿同一候选/保留路径寻找上游 Micro root，仅修改其真实 simulator parameter，范围标记为 `upstream_mediated`。
@@ -123,7 +139,7 @@ request/response 不会被静默覆盖。
 全部正式数据位于：
 
 ```text
-runs\rerun_001\
+runs\formal_scale_v2_001\
 ```
 
 关键目录：
@@ -148,7 +164,7 @@ runs\rerun_001\
 
 ```powershell
 .\.venv\Scripts\python render_paper_figures.py `
-  --run runs\rerun_001 `
+  --run runs\formal_scale_v2_001 `
   --plot-repo "..\llm-agentic-dis" `
   --formats png svg pdf
 ```
@@ -159,11 +175,11 @@ runs\rerun_001\
 
 ```powershell
 .\.venv\Scripts\python export_visualization_bundle.py `
-  --run runs\rerun_001 `
+  --run runs\formal_scale_v2_001 `
   --plot-repo "..\llm-agentic-dis"
 ```
 
-该命令写入绘图库的 `data\generated_runs\rerun_001\`；若目标已存在会拒绝覆盖。科学绘图参数只读取 run 内冻结配置；本地绘图库仅作为原始视觉语言的已校验参考。
+该命令写入绘图库的 `data\generated_runs\formal_scale_v2_001\`；若目标已存在会拒绝覆盖。科学绘图参数只读取 run 内冻结配置；本地绘图库仅作为原始视觉语言的已校验参考。
 
 ## 第七步：可直接用于论文的文件
 
