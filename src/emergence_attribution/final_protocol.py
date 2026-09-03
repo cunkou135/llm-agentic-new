@@ -118,6 +118,7 @@ HOLDOUT_PROSPECTIVE_COLUMNS = [
 HOLDOUT_MECHANISM_COLUMNS = [
     "evaluation_track",
     "scenario",
+    "hypothesis_group_id",
     "root_source",
     "source",
     "target",
@@ -166,6 +167,7 @@ PATH_ATTENUATION_COLUMNS = [
     "evaluation_track",
     "scenario",
     "path_id",
+    "hypothesis_group_id",
     "mechanism_variant",
     "node_id",
     "scale",
@@ -674,6 +676,56 @@ def _edge_pairs(graph: Any, scenario: str | None = None) -> set[tuple[str, str]]
     return pairs
 
 
+def _edge_group_keys(
+    graph: Any, scenario: str | None = None
+) -> set[tuple[str, str, str]]:
+    if graph is None:
+        return set()
+    if isinstance(graph, Mapping):
+        if scenario in graph:
+            return _edge_group_keys(graph[scenario], scenario)
+        for key in ((scenario, "full_method"), (scenario, "frozen_full_method")):
+            if key in graph:
+                return _edge_group_keys(graph[key], scenario)
+        return set()
+    if isinstance(graph, pd.DataFrame):
+        frame = graph
+        if scenario is not None and "scenario" in frame:
+            frame = frame[frame["scenario"].astype(str) == str(scenario)]
+        if "hypothesis_group_id" not in frame:
+            return set()
+        source_column = "source" if "source" in frame else "edge_source"
+        target_column = "target" if "target" in frame else "edge_target"
+        return set(
+            zip(
+                frame["hypothesis_group_id"].astype(str),
+                frame[source_column].astype(str),
+                frame[target_column].astype(str),
+            )
+        )
+    keys: set[tuple[str, str, str]] = set()
+    for edge in graph:
+        if isinstance(edge, tuple):
+            if len(edge) >= 3:
+                keys.add((str(edge[0]), str(edge[1]), str(edge[2])))
+        elif isinstance(edge, Mapping):
+            if "hypothesis_group_id" in edge:
+                keys.add(
+                    (
+                        str(edge["hypothesis_group_id"]),
+                        str(edge["source"]),
+                        str(edge["target"]),
+                    )
+                )
+        else:
+            hypothesis_group_id = getattr(edge, "hypothesis_group_id", None)
+            if hypothesis_group_id is not None:
+                keys.add(
+                    (str(hypothesis_group_id), str(edge.source), str(edge.target))
+                )
+    return keys
+
+
 def holdout_prospective_confirmation(
     frozen_predictions: Mapping[str, Any],
     frozen_primary_graphs: Any,
@@ -692,7 +744,7 @@ def holdout_prospective_confirmation(
     )
     rows: list[dict[str, Any]] = []
     for scenario, predictions in sorted(scenarios.items()):
-        primary_pairs = _edge_pairs(frozen_primary_graphs, str(scenario))
+        primary_group_keys = _edge_group_keys(frozen_primary_graphs, str(scenario))
         paths = {
             str(path["path_id"]): path
             for path in (representations or {}).get(str(scenario), {}).get(
@@ -708,8 +760,12 @@ def holdout_prospective_confirmation(
                 str(path["micro_indicator"]), str(path["meso_indicator"]),
                 str(path["macro_indicator"]),
             ]
-            expected_edges = list(zip(indicators, indicators[1:]))
-            retained = [edge in primary_pairs for edge in expected_edges]
+            hypothesis_group_id = f"macro_outcome_{path['macro_indicator']}"
+            expected_edges = [
+                (hypothesis_group_id, source, target)
+                for source, target in zip(indicators, indicators[1:])
+            ]
+            retained = [edge in primary_group_keys for edge in expected_edges]
             selected = holdout_effects[
                 (holdout_effects["scenario"].astype(str) == str(scenario))
                 & (holdout_effects["parameter"].astype(str) == str(path["parameter"]))
@@ -779,7 +835,8 @@ def holdout_mechanism_confirmation(
     if frozen_primary_classifications.empty:
         return _empty(HOLDOUT_MECHANISM_COLUMNS)
     required = {
-        "scenario", "root_source", "source", "target", "parameter", "direction", "primary_class"
+        "scenario", "hypothesis_group_id", "root_source", "source", "target",
+        "parameter", "direction", "primary_class"
     }
     _require_columns(frozen_primary_classifications, required, "primary classifications")
     _require_columns(holdout_classifications, required, "holdout classifications")
@@ -795,7 +852,8 @@ def holdout_mechanism_confirmation(
         primary = primary[primary["method"].astype(str) == "full_method"]
     primary = primary[primary["primary_class"].astype(str) == "supported"]
     identity_columns = [
-        "scenario", "root_source", "source", "target", "parameter", "direction"
+        "scenario", "hypothesis_group_id", "root_source", "source", "target",
+        "parameter", "direction"
     ]
     primary = primary.drop_duplicates(identity_columns)
     rows: list[dict[str, Any]] = []
@@ -816,7 +874,10 @@ def holdout_mechanism_confirmation(
         else:
             holdout_class = "inconclusive"
         scenario = definition["scenario"]
-        pair = (definition["source"], definition["target"])
+        edge_key = (
+            definition["hypothesis_group_id"], definition["source"],
+            definition["target"],
+        )
         rows.append(
             {
                 "evaluation_track": "holdout_confirmation",
@@ -825,12 +886,14 @@ def holdout_mechanism_confirmation(
                 "holdout_class": holdout_class,
                 "classification": _confirmation_class(holdout_class),
                 "retained_in_holdout_baseline": (
-                    pair in _edge_pairs(holdout_baseline_graphs, scenario)
+                    edge_key in _edge_group_keys(holdout_baseline_graphs, scenario)
                     if holdout_baseline_graphs is not None
                     else pd.NA
                 ),
                 "retained_in_holdout_mechanism_disabled": (
-                    pair in _edge_pairs(holdout_mechanism_disabled_graphs, scenario)
+                    edge_key in _edge_group_keys(
+                        holdout_mechanism_disabled_graphs, scenario
+                    )
                     if holdout_mechanism_disabled_graphs is not None
                     else pd.NA
                 ),
@@ -1028,13 +1091,14 @@ def path_mechanism_attenuation(
     ):
         first = group.iloc[0]
         scenario = str(first["scenario"])
+        hypothesis_group_id = f"macro_outcome_{first['macro']}"
         nodes = [
             (str(first["source"]), "micro", None),
             (str(first["meso"]), "meso", str(first["source"])),
             (str(first["macro"]), "macro", str(first["meso"])),
         ]
-        baseline_pairs = _edge_pairs(baseline_graphs, scenario)
-        disabled_pairs = _edge_pairs(disabled_graphs, scenario)
+        baseline_group_keys = _edge_group_keys(baseline_graphs, scenario)
+        disabled_group_keys = _edge_group_keys(disabled_graphs, scenario)
         for node_id, scale, parent in nodes:
             baseline_effect = baseline.get((scenario, node_id), float("nan"))
             disabled_effect = disabled.get((scenario, node_id), float("nan"))
@@ -1043,12 +1107,16 @@ def path_mechanism_attenuation(
                 attenuation = 1.0 - ratio
             else:
                 ratio = attenuation = float("nan")
-            incoming = (parent, node_id) if parent is not None else None
+            incoming = (
+                (hypothesis_group_id, parent, node_id)
+                if parent is not None else None
+            )
             rows.append(
                 {
                     "evaluation_track": "falsification_control",
                     "scenario": scenario,
                     "path_id": str(path_id),
+                    "hypothesis_group_id": hypothesis_group_id,
                     "mechanism_variant": str(mechanism_variants.get(scenario, "")),
                     "node_id": node_id,
                     "scale": scale,
@@ -1057,10 +1125,10 @@ def path_mechanism_attenuation(
                     "disabled_to_baseline_ratio": ratio,
                     "attenuation_ratio": attenuation,
                     "temporal_edge_retained_baseline": (
-                        incoming in baseline_pairs if incoming is not None else pd.NA
+                        incoming in baseline_group_keys if incoming is not None else pd.NA
                     ),
                     "temporal_edge_retained_disabled": (
-                        incoming in disabled_pairs if incoming is not None else pd.NA
+                        incoming in disabled_group_keys if incoming is not None else pd.NA
                     ),
                     "uses_hidden_truth": False,
                 }

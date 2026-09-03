@@ -83,7 +83,11 @@ def _frozen_path() -> pd.DataFrame:
     )
 
 
-def _edge(source: str, target: str) -> TemporalEdge:
+def _edge(
+    source: str,
+    target: str,
+    hypothesis_group_id: str = "macro_outcome_macro_c",
+) -> TemporalEdge:
     return TemporalEdge(
         source=source,
         target=target,
@@ -95,7 +99,7 @@ def _edge(source: str, target: str) -> TemporalEdge:
         support=0.9,
         lag_support=0.8,
         lag_std=0.0,
-        hypothesis_group_id="macro_outcome_macro_c",
+        hypothesis_group_id=hypothesis_group_id,
     )
 
 
@@ -249,6 +253,7 @@ def test_holdout_mechanism_confirmation_is_separate_from_primary() -> None:
             {
                 "scenario": "toy",
                 "method": "full_method",
+                "hypothesis_group_id": "macro_outcome_macro_c",
                 "root_source": "micro_a",
                 "source": "micro_a",
                 "target": "meso_b",
@@ -263,7 +268,7 @@ def test_holdout_mechanism_confirmation_is_separate_from_primary() -> None:
     result = holdout_mechanism_confirmation(
         primary,
         holdout,
-        holdout_baseline_graphs={"toy": [("micro_a", "meso_b")]},
+        holdout_baseline_graphs={"toy": [_edge("micro_a", "meso_b")]},
         holdout_mechanism_disabled_graphs={"toy": []},
     )
     assert list(result.columns) == HOLDOUT_MECHANISM_COLUMNS
@@ -385,8 +390,8 @@ def test_path_mechanism_attenuation_uses_only_public_frozen_path() -> None:
         frozen,
         baseline,
         disabled,
-        baseline_graphs={"toy": [("micro_a", "meso_b"), ("meso_b", "macro_c")]},
-        disabled_graphs={"toy": [("micro_a", "meso_b")]},
+        baseline_graphs={"toy": [_edge("micro_a", "meso_b"), _edge("meso_b", "macro_c")]},
+        disabled_graphs={"toy": [_edge("micro_a", "meso_b")]},
         mechanism_variants={"toy": "disable_public_mechanism"},
     )
     assert list(result.columns) == PATH_ATTENUATION_COLUMNS
@@ -396,6 +401,69 @@ def test_path_mechanism_attenuation_uses_only_public_frozen_path() -> None:
     assert macro["attenuation_ratio"] == 0.75
     assert bool(macro["temporal_edge_retained_baseline"])
     assert not bool(macro["temporal_edge_retained_disabled"])
+
+
+def test_secondary_confirmations_do_not_borrow_edges_across_hypothesis_groups() -> None:
+    prediction = {
+        "prediction_id": "pred_c", "candidate_path_id": "path_toy_01",
+        "scientific_rationale": "frozen", "falsification_condition": "missing edge",
+    }
+    effects = pd.DataFrame(
+        [
+            {
+                "scenario": "toy", "parameter": "theta", "direction": "plus",
+                "node_id": node, "significant": True, "effect_sign": 1,
+                "onset_time": onset,
+            }
+            for node, onset in (("micro_a", 1), ("meso_b", 2), ("macro_c", 3))
+        ]
+    )
+    cross_group_graph = {
+        "toy": [
+            _edge("micro_a", "meso_b", "macro_outcome_macro_d"),
+            _edge("meso_b", "macro_c", "macro_outcome_macro_c"),
+        ]
+    }
+    prospective = holdout_prospective_confirmation(
+        {"scenarios": {"toy": [prediction]}}, cross_group_graph, effects,
+        {"toy": _representation()},
+    )
+    assert not bool(prospective.iloc[0]["path_temporally_qualified"])
+    assert prospective.iloc[0]["classification"] == "failed_confirmation"
+
+    primary = pd.DataFrame(
+        [{
+            "scenario": "toy", "method": "full_method",
+            "hypothesis_group_id": "macro_outcome_macro_c",
+            "root_source": "micro_a", "source": "micro_a", "target": "meso_b",
+            "parameter": "theta", "direction": "plus", "primary_class": "supported",
+        }]
+    )
+    holdout = primary.drop(columns="method").copy()
+    holdout["hypothesis_group_id"] = "macro_outcome_macro_d"
+    mechanism = holdout_mechanism_confirmation(
+        primary, holdout, holdout_baseline_graphs=cross_group_graph,
+    )
+    assert mechanism.iloc[0]["hypothesis_group_id"] == "macro_outcome_macro_c"
+    assert mechanism.iloc[0]["classification"] == "inconclusive"
+    assert not bool(mechanism.iloc[0]["retained_in_holdout_baseline"])
+
+    metrics = pd.DataFrame(
+        {
+            "scenario": ["toy"] * 3,
+            "node_id": ["micro_a", "meso_b", "macro_c"],
+            "effect": [1.0, 1.0, 1.0],
+        }
+    )
+    attenuation = path_mechanism_attenuation(
+        _frozen_path(), metrics, metrics, baseline_graphs=cross_group_graph,
+        disabled_graphs=cross_group_graph,
+        mechanism_variants={"toy": "disable_public_mechanism"},
+    )
+    meso = attenuation[attenuation["scale"] == "meso"].iloc[0]
+    assert meso["hypothesis_group_id"] == "macro_outcome_macro_c"
+    assert not bool(meso["temporal_edge_retained_baseline"])
+    assert not bool(meso["temporal_edge_retained_disabled"])
 
 
 def test_empty_results_preserve_all_public_schemas() -> None:
