@@ -388,6 +388,7 @@ def run_stage(
             "data/indicator_trajectories_complete.*",
             "data/controlled_recovery_trajectories_complete.*",
             "analysis/paired_effects.parquet", "analysis/effect_curves.parquet",
+            "analysis/mechanism_bidirectional_summary.csv",
             "analysis/intervention_classifications.csv",
             "analysis/edge_intervention_classifications.csv",
             "analysis/path_timing_summary.csv",

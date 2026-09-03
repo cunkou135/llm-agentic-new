@@ -21,6 +21,7 @@ PRIMARY_FREEZE_INPUTS = [
     "representation/representation_validation.json",
     "analysis/main_graphs.jsonl",
     "analysis/paired_effects.parquet",
+    "analysis/mechanism_bidirectional_summary.csv",
     "analysis/intervention_classifications.csv",
     "analysis/edge_intervention_classifications.csv",
     "analysis/path_timing_summary.csv",

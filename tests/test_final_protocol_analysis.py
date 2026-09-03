@@ -177,6 +177,7 @@ def test_holdout_path_confirmation_uses_exact_frozen_root_and_does_not_reselect(
     rows = [
         {
             "scenario": "toy",
+            "hypothesis_group_id": "macro_outcome_macro_c",
             "root_source": "micro_a",
             "source": source,
             "target": target,
@@ -191,6 +192,7 @@ def test_holdout_path_confirmation_uses_exact_frozen_root_and_does_not_reselect(
     rows.append(
         {
             "scenario": "toy",
+            "hypothesis_group_id": "macro_outcome_macro_c",
             "root_source": "micro_d",
             "source": "meso_b",
             "target": "macro_c",

@@ -42,7 +42,7 @@ class EffectSummary:
 
 
 CLASSIFICATION_COLUMNS = [
-    "scenario", "root_source", "edge_source", "edge_target",
+    "scenario", "hypothesis_group_id", "root_source", "edge_source", "edge_target",
     "source", "target", "parameter", "direction", "manipulation_level",
     "manipulation_success", "primary_class", "underlying_class",
     "intervention_scope", "root_onset", "source_onset", "target_onset",
@@ -93,12 +93,15 @@ def aggregate_edge_intervention_evidence(
     the manipulation root, because perturbation strength may be asymmetric.
     """
 
+    working = classifications.copy()
+    if "hypothesis_group_id" not in working.columns:
+        working["hypothesis_group_id"] = "ungrouped"
     identity_columns = ["scenario"]
     if "evaluation_track" in classifications.columns:
         identity_columns.append("evaluation_track")
     if "method" in classifications.columns:
         identity_columns.append("method")
-    identity_columns.extend(["source", "target"])
+    identity_columns.extend(["hypothesis_group_id", "source", "target"])
     columns = [
         *identity_columns, "edge_class",
         "attempt_count", "applicable_attempt_count", "supported_attempt_count",
@@ -107,13 +110,13 @@ def aggregate_edge_intervention_evidence(
     if classifications.empty:
         return pd.DataFrame(columns=columns)
     unknown = sorted(
-        set(classifications["primary_class"].astype(str)) - INTERVENTION_CLASSES
+        set(working["primary_class"].astype(str)) - INTERVENTION_CLASSES
     )
     if unknown:
         raise RuntimeError(f"unknown intervention classification values: {unknown}")
     group_columns = identity_columns
     rows: list[dict[str, Any]] = []
-    for identity, group in classifications.groupby(
+    for identity, group in working.groupby(
         group_columns, dropna=False, sort=True
     ):
         if not isinstance(identity, tuple):
@@ -452,6 +455,74 @@ def estimate_all_effects(
     return summaries, curves
 
 
+def mechanism_bidirectional_summary(
+    effects: pd.DataFrame,
+    representations: dict[str, dict[str, Any]],
+) -> pd.DataFrame:
+    """Expose both measured directions without changing path classification."""
+
+    identity = [
+        "scenario", "parameter", "micro", "meso", "macro",
+        "primary_path_direction",
+    ]
+    measures = [
+        f"{direction}_{scale}_{measure}"
+        for direction in ("minus", "plus")
+        for scale in ("micro", "meso", "macro")
+        for measure in (
+            "effect", "ci_low", "ci_high", "onset", "significant", "effect_sign",
+        )
+    ]
+    rows: list[dict[str, Any]] = []
+    for scenario, representation in sorted(representations.items()):
+        scenario_effects = effects[effects["scenario"].astype(str) == scenario]
+        for path in representation.get("candidate_paths", []):
+            parameter = str(path["parameter"])
+            nodes = {
+                "micro": str(path["micro_indicator"]),
+                "meso": str(path["meso_indicator"]),
+                "macro": str(path["macro_indicator"]),
+            }
+            row: dict[str, Any] = {
+                "scenario": scenario,
+                "parameter": parameter,
+                **nodes,
+                "primary_path_direction": str(path["intervention_direction"]),
+            }
+            for direction in ("minus", "plus"):
+                for scale, node_id in nodes.items():
+                    match = scenario_effects[
+                        (scenario_effects["parameter"].astype(str) == parameter)
+                        & (scenario_effects["direction"].astype(str) == direction)
+                        & (scenario_effects["node_id"].astype(str) == node_id)
+                    ]
+                    item = match.iloc[0] if len(match) else None
+                    prefix = f"{direction}_{scale}"
+                    row[f"{prefix}_effect"] = (
+                        float(item["cumulative_effect_standardised"])
+                        if item is not None else np.nan
+                    )
+                    row[f"{prefix}_ci_low"] = (
+                        float(item["cumulative_ci_low_standardised"])
+                        if item is not None else np.nan
+                    )
+                    row[f"{prefix}_ci_high"] = (
+                        float(item["cumulative_ci_high_standardised"])
+                        if item is not None else np.nan
+                    )
+                    row[f"{prefix}_onset"] = (
+                        int(item["onset_time"]) if item is not None else -1
+                    )
+                    row[f"{prefix}_significant"] = (
+                        bool(item["significant"]) if item is not None else False
+                    )
+                    row[f"{prefix}_effect_sign"] = (
+                        int(item["effect_sign"]) if item is not None else 0
+                    )
+            rows.append(row)
+    return pd.DataFrame(rows, columns=[*identity, *measures])
+
+
 def direct_parameter_sources(representation: dict[str, Any]) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     for indicator in representation["indicators"]:
@@ -531,6 +602,7 @@ def intervention_testable_edges(
 def not_applicable_classification(
     scenario: str,
     *,
+    hypothesis_group_id: str = "ungrouped",
     source: str = "",
     target: str = "",
     observational_lag: float = np.nan,
@@ -538,6 +610,7 @@ def not_applicable_classification(
 ) -> dict[str, Any]:
     return {
         "scenario": scenario,
+        "hypothesis_group_id": hypothesis_group_id,
         "root_source": "",
         "edge_source": source,
         "edge_target": target,
@@ -585,6 +658,7 @@ def classify_edge_interventions(
             rows.append(
                 not_applicable_classification(
                     scenario,
+                    hypothesis_group_id=edge.hypothesis_group_id,
                     source=edge.source,
                     target=edge.target,
                     observational_lag=edge.lag,
@@ -650,6 +724,7 @@ def classify_edge_interventions(
                 rows.append(
                     {
                         "scenario": scenario,
+                        "hypothesis_group_id": edge.hypothesis_group_id,
                         "root_source": root_source,
                         "edge_source": edge.source,
                         "edge_target": edge.target,
@@ -879,7 +954,8 @@ def eligible_propagation_path_ids(
 
 
 PATH_INTERVENTION_CLASSIFICATION_COLUMNS = [
-    "scenario", "path_id", "parameter", "direction", "micro", "meso", "macro",
+    "scenario", "path_id", "parameter", "direction", "hypothesis_group_id",
+    "micro", "meso", "macro",
     "path_temporally_qualified", "manipulation_success",
     "micro_meso_class", "meso_macro_class", "direction_supported",
     "onset_order_supported", "path_classification", "reason",
@@ -911,6 +987,7 @@ def classify_candidate_paths(
             macro = str(path["macro_indicator"])
             parameter = str(path["parameter"])
             direction = str(path["intervention_direction"])
+            hypothesis_group_id = f"macro_outcome_{macro}"
             temporal = temporal_by_id.get(path_id)
             qualified = bool(
                 temporal is not None and temporal.path_temporally_qualified
@@ -921,6 +998,10 @@ def classify_candidate_paths(
                 & (classifications["parameter"].astype(str) == parameter)
                 & (classifications["direction"].astype(str) == direction)
                 & (classifications["root_source"].astype(str) == micro)
+                & (
+                    classifications["hypothesis_group_id"].astype(str)
+                    == hypothesis_group_id
+                )
             ]
             evidence = aggregate_edge_intervention_evidence(subset)
             edge_classes = {
@@ -1006,6 +1087,7 @@ def classify_candidate_paths(
                 {
                     "scenario": scenario, "path_id": path_id,
                     "parameter": parameter, "direction": direction,
+                    "hypothesis_group_id": hypothesis_group_id,
                     "micro": micro, "meso": meso, "macro": macro,
                     "path_temporally_qualified": qualified,
                     "manipulation_success": manipulation_success,
@@ -1131,6 +1213,9 @@ def run_intervention_stage(
     analysis_root = run_root / "analysis"
     effects.to_parquet(analysis_root / "paired_effects.parquet", index=False)
     curves.to_parquet(analysis_root / "effect_curves.parquet", index=False)
+    mechanism_bidirectional_summary(effects, representations).to_csv(
+        analysis_root / "mechanism_bidirectional_summary.csv", index=False
+    )
     classification_frame.to_csv(
         analysis_root / "intervention_classifications.csv", index=False
     )

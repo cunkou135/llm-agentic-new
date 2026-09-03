@@ -217,6 +217,7 @@ def test_path_temporal_qualification_requires_both_group_specific_edges() -> Non
 def _path_attempts(path: dict, first_class: str, second_class: str, manipulation: bool = True) -> pd.DataFrame:
     base = {
         "scenario": "schelling", "method": "full_method",
+        "hypothesis_group_id": f"macro_outcome_{path['macro_indicator']}",
         "root_source": path["micro_indicator"], "parameter": path["parameter"],
         "direction": path["intervention_direction"],
         "manipulation_success": manipulation, "root_onset": 0,
@@ -263,6 +264,67 @@ def test_path_intervention_classification(
         {"schelling": representation},
     )
     assert result.iloc[0]["path_classification"] == expected
+
+
+def test_path_intervention_evidence_isolated_by_macro_hypothesis_group() -> None:
+    paths = [
+        {
+            "path_id": "path_c", "parameter": "theta",
+            "intervention_direction": "plus", "micro_indicator": "micro_a",
+            "meso_indicator": "meso_b", "macro_indicator": "macro_c",
+            "expected_micro_response": "increase",
+            "expected_meso_response": "increase",
+            "expected_macro_response": "increase",
+            "micro_to_meso_expected_direction": "increase",
+            "meso_to_macro_expected_direction": "increase",
+        },
+        {
+            "path_id": "path_d", "parameter": "theta",
+            "intervention_direction": "plus", "micro_indicator": "micro_a",
+            "meso_indicator": "meso_b", "macro_indicator": "macro_d",
+            "expected_micro_response": "increase",
+            "expected_meso_response": "increase",
+            "expected_macro_response": "increase",
+            "micro_to_meso_expected_direction": "increase",
+            "meso_to_macro_expected_direction": "increase",
+        },
+    ]
+    qualification = pd.DataFrame(
+        [
+            {"scenario": "toy", "path_id": path["path_id"],
+             "path_temporally_qualified": True}
+            for path in paths
+        ]
+    )
+    common = {
+        "scenario": "toy", "method": "full_method", "root_source": "micro_a",
+        "parameter": "theta", "direction": "plus", "manipulation_success": True,
+        "root_onset": 0, "root_effect": 0.5, "source_effect": 0.5,
+    }
+    classifications = pd.DataFrame(
+        [
+            {**common, "hypothesis_group_id": "macro_outcome_macro_c",
+             "source": "micro_a", "target": "meso_b", "primary_class": "supported",
+             "target_effect": 0.4, "source_onset": 0, "target_onset": 1},
+            {**common, "hypothesis_group_id": "macro_outcome_macro_c",
+             "source": "meso_b", "target": "macro_c", "primary_class": "supported",
+             "target_effect": 0.3, "source_onset": 1, "target_onset": 2},
+            {**common, "hypothesis_group_id": "macro_outcome_macro_d",
+             "source": "micro_a", "target": "meso_b",
+             "primary_class": "directionally_contradicted", "target_effect": -0.4,
+             "source_onset": 0, "target_onset": 1},
+            {**common, "hypothesis_group_id": "macro_outcome_macro_d",
+             "source": "meso_b", "target": "macro_d", "primary_class": "supported",
+             "target_effect": 0.3, "source_onset": 1, "target_onset": 2},
+        ]
+    )
+
+    result = classify_candidate_paths(
+        qualification, classifications, {"toy": {"candidate_paths": paths}}
+    ).set_index("path_id")
+
+    assert result.loc["path_c", "path_classification"] == "supported"
+    assert result.loc["path_d", "path_classification"] == "contradicted"
 
 
 def test_prospective_prediction_cannot_invent_path() -> None:

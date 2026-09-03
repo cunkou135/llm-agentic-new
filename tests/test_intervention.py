@@ -7,6 +7,7 @@ from emergence_attribution.interventions import (
     _effect_job,
     classify_edge_interventions,
     detect_onset,
+    mechanism_bidirectional_summary,
 )
 from emergence_attribution.temporal import TemporalEdge
 
@@ -162,3 +163,44 @@ def test_empty_graph_classification_has_stable_schema() -> None:
     )
     assert frame.empty
     assert {"scenario", "source", "target", "primary_class"}.issubset(frame.columns)
+
+
+def test_mechanism_bidirectional_summary_preserves_minus_and_plus() -> None:
+    rows = []
+    for direction, values in (
+        ("minus", (-0.4, -0.3, -0.2)),
+        ("plus", (0.5, 0.35, 0.2)),
+    ):
+        for onset, (node_id, effect) in enumerate(
+            zip(("micro_a", "meso_b", "macro_c"), values)
+        ):
+            rows.append(
+                {
+                    "scenario": "toy", "parameter": "theta", "direction": direction,
+                    "node_id": node_id, "cumulative_effect_standardised": effect,
+                    "cumulative_ci_low_standardised": effect - 0.05,
+                    "cumulative_ci_high_standardised": effect + 0.05,
+                    "onset_time": onset, "significant": True,
+                    "effect_sign": int(np.sign(effect)),
+                }
+            )
+    representations = {
+        "toy": {
+            "candidate_paths": [
+                {
+                    "path_id": "path_c", "parameter": "theta",
+                    "intervention_direction": "plus", "micro_indicator": "micro_a",
+                    "meso_indicator": "meso_b", "macro_indicator": "macro_c",
+                }
+            ]
+        }
+    }
+
+    summary = mechanism_bidirectional_summary(pd.DataFrame(rows), representations)
+
+    assert len(summary) == 1
+    assert summary.iloc[0]["primary_path_direction"] == "plus"
+    assert summary.iloc[0]["minus_micro_effect"] == -0.4
+    assert summary.iloc[0]["minus_macro_effect_sign"] == -1
+    assert summary.iloc[0]["plus_macro_effect"] == 0.2
+    assert bool(summary.iloc[0]["plus_meso_significant"])

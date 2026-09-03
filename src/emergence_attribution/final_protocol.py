@@ -83,6 +83,7 @@ HOLDOUT_PATH_COLUMNS = [
     "path_id",
     "parameter",
     "direction",
+    "hypothesis_group_id",
     "micro",
     "source",
     "meso",
@@ -565,7 +566,10 @@ def holdout_path_confirmation(
     )
     _require_columns(
         holdout_classifications,
-        {"scenario", "root_source", "source", "target", "parameter", "direction", "primary_class"},
+        {
+            "scenario", "hypothesis_group_id", "root_source", "source", "target",
+            "parameter", "direction", "primary_class",
+        },
         "holdout classifications",
     )
     rows: list[dict[str, Any]] = []
@@ -580,11 +584,16 @@ def holdout_path_confirmation(
         }
         definition["micro"] = str(first[micro_column])
         definition["source"] = definition["micro"]
+        definition["hypothesis_group_id"] = f"macro_outcome_{definition['macro']}"
         subset = holdout_classifications[
             (holdout_classifications["scenario"].astype(str) == definition["scenario"])
             & (holdout_classifications["parameter"].astype(str) == definition["parameter"])
             & (holdout_classifications["direction"].astype(str) == definition["direction"])
             & (holdout_classifications["root_source"].astype(str) == definition["source"])
+            & (
+                holdout_classifications["hypothesis_group_id"].astype(str)
+                == definition["hypothesis_group_id"]
+            )
         ]
         if "method" in subset.columns:
             subset = subset[
