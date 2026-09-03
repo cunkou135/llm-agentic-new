@@ -11,14 +11,21 @@ from .provenance import RunContractError, sha256_file
 
 
 PRIMARY_FREEZE_INPUTS = [
+    "representation/indicators_frozen.json",
+    "representation/INDICATORS_FROZEN.sha256",
+    "representation/candidate_paths.json",
+    "representation/CANDIDATE_PATHS_FROZEN.sha256",
+    "representation/derived_candidate_edges.json",
     "representation/prospective_predictions.json",
+    "representation/PROSPECTIVE_PREDICTIONS_FROZEN.sha256",
     "representation/representation_validation.json",
     "analysis/main_graphs.jsonl",
     "analysis/paired_effects.parquet",
     "analysis/intervention_classifications.csv",
     "analysis/edge_intervention_classifications.csv",
     "analysis/path_timing_summary.csv",
-    "analysis/representative_path_selection.json",
+    "analysis/path_temporal_qualification.csv",
+    "analysis/path_intervention_classification.csv",
     "analysis/prospective_validation.csv",
 ]
 

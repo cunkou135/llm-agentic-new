@@ -31,9 +31,19 @@ from emergence_attribution.temporal import TemporalEdge
 def _representation() -> dict:
     return {
         "indicators": [
-            {"id": "micro_a", "scale": "micro", "branch_id": "branch_a"},
-            {"id": "meso_b", "scale": "meso", "branch_id": "branch_a"},
-            {"id": "macro_c", "scale": "macro", "branch_id": "branch_a"},
+            {"id": "micro_a", "scale": "micro"},
+            {"id": "meso_b", "scale": "meso"},
+            {"id": "macro_c", "scale": "macro"},
+        ],
+        "candidate_paths": [
+            {
+                "path_id": "path_toy_01", "parameter": "theta",
+                "intervention_direction": "plus", "micro_indicator": "micro_a",
+                "meso_indicator": "meso_b", "macro_indicator": "macro_c",
+                "expected_micro_response": "increase",
+                "expected_meso_response": "increase",
+                "expected_macro_response": "increase",
+            }
         ],
         "candidate_edges": [
             {
@@ -85,7 +95,7 @@ def _edge(source: str, target: str) -> TemporalEdge:
         support=0.9,
         lag_support=0.8,
         lag_std=0.0,
-        branch_id="branch_a",
+        hypothesis_group_id="macro_outcome_macro_c",
     )
 
 
@@ -127,7 +137,7 @@ def test_dose_response_effects_and_summary_are_secondary_and_paired() -> None:
     representations = {
         "toy": {
             "indicators": [
-                {"id": "micro_a", "scale": "micro", "branch_id": "branch_a"}
+                {"id": "micro_a", "scale": "micro"}
             ],
             "candidate_edges": [],
         }
@@ -200,22 +210,9 @@ def test_holdout_path_confirmation_uses_exact_frozen_root_and_does_not_reselect(
 def test_holdout_prospective_confirmation_reuses_frozen_prediction_and_graph() -> None:
     prediction = {
         "prediction_id": "pred_1",
-        "phenomenon": "toy propagation",
-        "parameter": "theta",
-        "intervention_direction": "plus",
-        "source_indicator": "micro_a",
-        "downstream_indicators": ["meso_b", "macro_c"],
-        "expected_source_direction": "increase",
-        "expected_downstream_direction": ["increase", "increase"],
-        "validation_criteria": {
-            "required_source_response": True,
-            "required_downstream_response": [True, True],
-            "required_temporal_order": True,
-            "required_candidate_edges": [
-                {"source": "micro_a", "target": "meso_b"},
-                {"source": "meso_b", "target": "macro_c"},
-            ],
-        },
+        "candidate_path_id": "path_toy_01",
+        "prospective_priority": 0,
+        "scientific_rationale": "Frozen before any numerical data are generated.",
         "falsification_condition": "wrong direction or order",
     }
     frozen = {"scenarios": {"toy": [copy.deepcopy(prediction)]}}
@@ -237,6 +234,7 @@ def test_holdout_prospective_confirmation_reuses_frozen_prediction_and_graph() -
         frozen,
         {("toy", "full_method"): [_edge("micro_a", "meso_b"), _edge("meso_b", "macro_c")]},
         effects,
+        {"toy": _representation()},
     )
     assert list(result.columns) == HOLDOUT_PROSPECTIVE_COLUMNS
     assert result.iloc[0]["classification"] == "confirmed"

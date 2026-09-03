@@ -1,16 +1,17 @@
-"""Data-blind semantic generation, repair, selection, and immutable freezing."""
+"""Two-phase data-blind semantic generation and immutable freezing."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
-from pydantic import ValidationError
+import pandas as pd
+from pydantic import BaseModel, ValidationError
 
 from .dsl import (
     DSLValidationError,
@@ -24,38 +25,28 @@ from .dsl import (
     global_structure_operators,
     grammar_description,
     is_genuine_meso_expression,
-    is_trivial_micro_macro_lineage,
     is_trivial_cross_scale_transform,
+    is_trivial_micro_macro_lineage,
     validate_indicator_expression,
     validate_temporal_aggregation,
 )
 from .llm_client import LLMResponse, OpenAICompatibleClient, load_llm_config
 from .raw_schemas import prompt_scenario_contract, raw_schema
-from .replication import write_replication_agreement
-from .schemas import SemanticGeneration
+from .schemas import (
+    CandidateEdge,
+    IndicatorGeneration,
+    PathGeneration,
+    StructuredRepresentation,
+)
 
 
 FORBIDDEN_PROMPT_KEYS = {
-    "reference_branch",
-    "truth_role",
-    "truth_edge",
-    "truth_lag",
-    "truth_sign",
-    "edge_f1",
-    "shd",
-    "temporal_results",
-    "intervention_results",
-    "baseline_numerical_summary",
-    "mechanism_channel",
-    "controlled latent",
-    "reference process",
-    "reference branch",
-    "reference edge",
-    "reference lag",
-    "reference sign",
-    "truth role",
+    "truth_role", "truth_edge", "truth_lag", "truth_sign", "edge_f1", "shd",
+    "temporal_results", "intervention_results", "baseline_numerical_summary",
+    "mechanism_channel", "controlled latent", "reference process",
+    "reference edge", "reference lag", "reference sign", "previous successful path",
+    "res2", "res_f",
 }
-
 SCALE_ENTITY_SCOPES = {
     "micro": {"individual", "interaction", "elementary_event", "local_process"},
     "meso": {"neighborhood", "district", "community", "cluster", "local_domain"},
@@ -76,492 +67,24 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_immutable_text(path: Path, content: str) -> None:
-    """Create an LLM history artifact once, or verify identical existing bytes."""
+def _atomic_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, path)
 
+
+def _write_immutable(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         if path.read_text(encoding="utf-8") != content:
-            raise RuntimeError(f"refusing to overwrite completed LLM history: {path}")
+            raise RuntimeError(f"refusing to overwrite immutable semantic artifact: {path}")
         return
     path.write_text(content, encoding="utf-8")
 
 
-def _write_generation_checkpoint(
-    generation_root: Path,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    artifacts = {
-        path.name: _sha256_path(path)
-        for path in sorted(generation_root.glob("*"))
-        if path.is_file()
-        and (
-            path.name == "prompt.md"
-            or path.name.startswith("request_round_")
-            or path.name.startswith("response_round_")
-        )
-    }
-    completed = {
-        **payload,
-        "checkpoint": {
-            "schema_version": "1.0",
-            "payload_sha256": sha256_json(payload),
-            "artifact_sha256": artifacts,
-            "accepted_generation_sha256": sha256_json(payload["accepted_generation"])
-            if payload.get("accepted_generation") is not None
-            else None,
-        },
-    }
-    result_path = generation_root / "generation_result.json"
-    result_text = json.dumps(completed, indent=2, ensure_ascii=False)
-    _write_immutable_text(result_path, result_text)
-    _write_immutable_text(
-        generation_root / "generation_result.sha256",
-        _sha256_path(result_path) + "\n",
-    )
-    return completed
-
-
-def _load_verified_generation_checkpoint(
-    generation_root: Path,
-    scenario: str,
-    generation_index: int,
-    expected_prompt: str,
-    scenario_spec: dict[str, Any],
-    representation_config: dict[str, Any],
-) -> dict[str, Any] | None:
-    result_path = generation_root / "generation_result.json"
-    checksum_path = generation_root / "generation_result.sha256"
-    if not result_path.exists() and not checksum_path.exists():
-        return None
-    if not result_path.is_file() or not checksum_path.is_file():
-        raise RuntimeError(f"incomplete generation checkpoint: {generation_root}")
-    expected_result_hash = checksum_path.read_text(encoding="utf-8").strip()
-    if _sha256_path(result_path) != expected_result_hash:
-        raise RuntimeError(f"generation result hash mismatch: {generation_root}")
-    payload = json.loads(result_path.read_text(encoding="utf-8"))
-    checkpoint = payload.get("checkpoint")
-    if not isinstance(checkpoint, dict):
-        raise RuntimeError(f"generation checkpoint metadata missing: {generation_root}")
-    unhashed = {key: value for key, value in payload.items() if key != "checkpoint"}
-    if checkpoint.get("payload_sha256") != sha256_json(unhashed):
-        raise RuntimeError(f"generation checkpoint payload hash mismatch: {generation_root}")
-    if payload.get("scenario") != scenario or int(payload.get("generation", -1)) != generation_index:
-        raise RuntimeError(f"generation checkpoint identity mismatch: {generation_root}")
-    for name, expected_hash in checkpoint.get("artifact_sha256", {}).items():
-        artifact = generation_root / name
-        if not artifact.is_file() or _sha256_path(artifact) != expected_hash:
-            raise RuntimeError(f"generation artifact hash mismatch: {artifact}")
-    prompt_path = generation_root / "prompt.md"
-    if not prompt_path.is_file() or prompt_path.read_text(encoding="utf-8") != expected_prompt:
-        raise RuntimeError(f"generation prompt does not match current contract: {generation_root}")
-    accepted = payload.get("accepted_generation")
-    if payload.get("status") == "accepted":
-        if checkpoint.get("accepted_generation_sha256") != sha256_json(accepted):
-            raise RuntimeError(f"accepted generation hash mismatch: {generation_root}")
-        value = SemanticGeneration.model_validate(accepted)
-        validation = validate_generation(
-            value, scenario, scenario_spec, representation_config
-        )
-        if not validation["valid"]:
-            raise RuntimeError(
-                f"accepted generation no longer validates: {generation_root}: "
-                f"{validation['errors']}"
-            )
-    payload["resumed_from_verified_checkpoint"] = True
-    return payload
-
-
-def build_prompt(
-    scenario: str,
-    scenario_spec: dict[str, Any],
-    representation_config: dict[str, Any],
-    prompt_template: str,
-) -> tuple[str, str]:
-    contract = prompt_scenario_contract(scenario, scenario_spec)
-    contract["generic_computation_grammar"] = grammar_description()
-    contract["representation_budget"] = representation_config["budget"]
-    contract["representation_capacity_control"] = (
-        "The indicator, branch, and candidate-edge budgets are frozen capacity "
-        "controls for this experiment, not universal theoretical scale counts."
-    )
-    contract["required_branch_count"] = representation_config["required_branch_count"]
-    contract["candidate_edge_bounds"] = {
-        "minimum": representation_config["minimum_candidate_edges"],
-        "maximum": representation_config["maximum_candidate_edges"],
-    }
-    contract["structural_constraints"] = [
-        "candidate edges may be micro to meso or meso to macro only",
-        "candidate edges must remain within a generated branch",
-        "every branch must include at least one connected micro to meso to macro path",
-        "every micro node must have an outgoing candidate edge to a meso node",
-        "every meso node must have an incoming micro edge and an outgoing macro edge",
-        "every macro node must have an incoming meso edge",
-        "every controllable parameter must have at least one direct micro-level association",
-        "each prediction source must be such a direct micro-level association and its ordered path must exist in candidate_edges",
-        "prospective validation criteria must be Boolean and edge-list fields, not prose",
-        "the model must not infer any result from unprovided simulation statistics",
-    ]
-    contract["scale_semantics"] = {
-        "micro": (
-            "The scientific object is an individual agent, pairwise interaction, "
-            "elementary event, or local primitive process. Population prevalence "
-            "of elementary events remains Micro when entity_scope and rationale "
-            "identify that elementary object."
-        ),
-        "meso": (
-            "The scientific object is an actual subset, neighborhood, district, "
-            "community, cluster, or local domain. A Meso computation must quantify "
-            "organization across those entities through heterogeneity, separation, "
-            "a quantile range, within-entity structure, or an explicit local contrast. "
-            "A group/neighborhood mean followed only by outer mean or sum is not Meso."
-        ),
-        "macro": (
-            "The scientific object is the whole-system collective state or outcome "
-            "and entity_scope must be whole_system."
-        ),
-    }
-    contract["operator_scope_contract"] = {
-        "elementary_or_local_operators": sorted(ELEMENTARY_OR_LOCAL_OPERATORS),
-        "genuine_meso_primitives": sorted(GENUINE_MESO_OPERATORS),
-        "global_structure_operators": sorted(GLOBAL_STRUCTURE_OPERATORS),
-        "trivial_wrappers": sorted(TRIVIAL_WRAPPERS),
-        "global_rule": (
-            "An inherently whole-grid or whole-network operator that directly "
-            "returns one scalar per time step is valid only in a Macro computation, "
-            "never as Micro and never as sufficient Meso structure."
-        ),
-    }
-    contract["public_source_family_rule"] = (
-        "raw_field_schema primitive_family and statistic_role are public semantic "
-        "metadata for recognizing aliases such as an elementary event and its logged "
-        "aggregate count. They contain no hidden mechanism truth. A complete "
-        "Micro-to-Meso-to-Macro path is invalid when its Macro is only the same "
-        "primitive statistic as its Micro under rolling, differencing, normalization, "
-        "constant affine transformation, or equivalent count/fraction form."
-    )
-    contract["trivial_cross_scale_rule"] = (
-        "A cross-scale candidate edge is invalid when source and target have the "
-        "same canonical computation after stripping identity, rolling window, "
-        "difference, cumulative smoothing, and constant affine/rescaling wrappers, "
-        "unless the target introduces a new group/network/spatial structural entity. "
-        "Temporal smoothing alone never creates a scientific scale transition."
-    )
-    user = (
-        "Input contract:\n"
-        + json.dumps(contract, indent=2, ensure_ascii=False)
-        + "\n\nOutput JSON schema:\n"
-        + json.dumps(SemanticGeneration.model_json_schema(), indent=2, ensure_ascii=False)
-    )
-    combined = (prompt_template + "\n" + user).lower()
-    leaked = sorted(key for key in FORBIDDEN_PROMPT_KEYS if key in combined)
-    if leaked:
-        raise RuntimeError(f"prompt contains forbidden evaluation keys: {leaked}")
-    return prompt_template.strip(), user
-
-
-def _complete_paths(value: SemanticGeneration) -> dict[str, int]:
-    lookup = {item.id: item for item in value.representation.indicators}
-    first = [
-        edge
-        for edge in value.representation.candidate_edges
-        if lookup[edge.source].scale == "micro" and lookup[edge.target].scale == "meso"
-    ]
-    second = [
-        edge
-        for edge in value.representation.candidate_edges
-        if lookup[edge.source].scale == "meso" and lookup[edge.target].scale == "macro"
-    ]
-    counts: dict[str, int] = {}
-    for left in first:
-        for right in second:
-            if left.target == right.source:
-                branch = lookup[left.source].branch_id
-                counts[branch] = counts.get(branch, 0) + 1
-    return counts
-
-
-def _complete_path_triples(
-    value: SemanticGeneration,
-) -> list[tuple[str, str, str]]:
-    lookup = {item.id: item for item in value.representation.indicators}
-    first = [
-        edge
-        for edge in value.representation.candidate_edges
-        if lookup[edge.source].scale == "micro" and lookup[edge.target].scale == "meso"
-    ]
-    second = [
-        edge
-        for edge in value.representation.candidate_edges
-        if lookup[edge.source].scale == "meso" and lookup[edge.target].scale == "macro"
-    ]
-    return sorted(
-        {
-            (left.source, left.target, right.target)
-            for left in first
-            for right in second
-            if left.target == right.source
-        }
-    )
-
-
-def validate_generation(
-    value: SemanticGeneration,
-    scenario: str,
-    scenario_spec: dict[str, Any],
-    representation_config: dict[str, Any],
-) -> dict[str, Any]:
-    errors: list[str] = []
-    representation = value.representation
-    if representation.scenario != scenario:
-        errors.append(f"representation.scenario must be {scenario}")
-    budget = representation_config["budget"]
-    scale_counts = {
-        scale: sum(item.scale == scale for item in representation.indicators)
-        for scale in ("micro", "meso", "macro")
-    }
-    for scale, required in budget.items():
-        if scale_counts.get(scale, 0) != int(required):
-            errors.append(f"scale {scale} requires exactly {required} indicators")
-    branches = sorted({item.branch_id for item in representation.indicators})
-    if len(branches) != int(representation_config["required_branch_count"]):
-        errors.append(
-            f"exactly {representation_config['required_branch_count']} branches are required"
-        )
-    for branch in branches:
-        scales = {
-            item.scale for item in representation.indicators if item.branch_id == branch
-        }
-        if scales != {"micro", "meso", "macro"}:
-            errors.append(f"branch {branch} must contain all three scales")
-        macro_count = sum(
-            item.scale == "macro" and item.branch_id == branch
-            for item in representation.indicators
-        )
-        if macro_count != 1:
-            errors.append(f"branch {branch} must contain exactly one macro indicator")
-    paths = _complete_paths(value)
-    for branch in branches:
-        if paths.get(branch, 0) < 1:
-            errors.append(f"branch {branch} lacks a complete micro to meso to macro path")
-    schema = raw_schema(scenario)
-    schema_entity_levels = {
-        str(item["field_name"]): str(item.get("entity_level", ""))
-        for item in schema
-    }
-    source_family_by_indicator: dict[str, list[str]] = {}
-    for indicator in representation.indicators:
-        try:
-            validate_indicator_expression(indicator.computation, schema)
-        except DSLValidationError as exc:
-            errors.append(f"indicator {indicator.id}: {exc}")
-        try:
-            validate_temporal_aggregation(
-                indicator.temporal_aggregation.model_dump(mode="json", exclude_none=True)
-            )
-        except DSLValidationError as exc:
-            errors.append(f"indicator {indicator.id}: {exc}")
-        actual_fields = expression_fields(indicator.computation)
-        source_family_by_indicator[indicator.id] = sorted(
-            expression_primitive_families(indicator.computation, schema)
-        )
-        if actual_fields != set(indicator.source_fields):
-            errors.append(
-                f"indicator {indicator.id}: source_fields must exactly match AST fields {sorted(actual_fields)}"
-            )
-        if indicator.entity_scope not in SCALE_ENTITY_SCOPES[indicator.scale]:
-            errors.append(
-                f"indicator {indicator.id}: entity_scope {indicator.entity_scope!r} "
-                f"is invalid for {indicator.scale} scale"
-            )
-        if indicator.scale == "micro":
-            elementary_levels = {"agent", "interaction", "cell", "edge"}
-            if not any(
-                schema_entity_levels.get(field) in elementary_levels
-                for field in actual_fields
-            ):
-                errors.append(
-                    f"indicator {indicator.id}: Micro computation must derive from "
-                    "an agent, interaction, elementary event, cell, or edge primitive"
-                )
-        global_ops = sorted(global_structure_operators(indicator.computation))
-        if indicator.scale in {"micro", "meso"} and global_ops:
-            errors.append(
-                f"indicator {indicator.id}: global_structure_operator_invalid_for_"
-                f"{indicator.scale}: {global_ops}"
-            )
-        if indicator.scale == "meso" and not is_genuine_meso_expression(
-            indicator.computation
-        ):
-            errors.append(
-                f"indicator {indicator.id}: Meso requires genuine organization "
-                "across groups, districts, neighborhoods, communities, clusters, "
-                "or local domains; a pure outer mean/sum is insufficient"
-            )
-    parameter_names = set(scenario_spec["interventions"])
-    proposed_parameters: set[str] = set()
-    direct_micro_sources: dict[str, set[str]] = {name: set() for name in parameter_names}
-    for indicator in representation.indicators:
-        for association in indicator.parameter_associations:
-            if association.parameter not in parameter_names:
-                errors.append(
-                    f"indicator {indicator.id}: unknown parameter {association.parameter}"
-                )
-            else:
-                proposed_parameters.add(association.parameter)
-                if association.relationship == "direct" and indicator.scale == "micro":
-                    direct_micro_sources[association.parameter].add(indicator.id)
-    if representation_config.get("require_all_parameters_associated", False):
-        missing = sorted(parameter_names - proposed_parameters)
-        if missing:
-            errors.append(f"missing model-proposed parameter associations: {missing}")
-        missing_direct = sorted(
-            name for name, sources in direct_micro_sources.items() if not sources
-        )
-        if missing_direct:
-            errors.append(
-                f"parameters require at least one direct micro source: {missing_direct}"
-            )
-    edge_pairs = {(edge.source, edge.target) for edge in representation.candidate_edges}
-    indicator_lookup = {item.id: item for item in representation.indicators}
-    trivial_edges: list[tuple[str, str]] = []
-    for edge in representation.candidate_edges:
-        source = indicator_lookup[edge.source]
-        target = indicator_lookup[edge.target]
-        if is_trivial_cross_scale_transform(
-            source.computation,
-            source.temporal_aggregation.model_dump(mode="json", exclude_none=True),
-            target.computation,
-            target.temporal_aggregation.model_dump(mode="json", exclude_none=True),
-        ):
-            trivial_edges.append((edge.source, edge.target))
-            errors.append(
-                f"candidate edge {edge.source}->{edge.target}: "
-                "trivial_cross_scale_transform"
-            )
-    trivial_micro_macro_paths: list[tuple[str, str, str]] = []
-    for micro_id, meso_id, macro_id in _complete_path_triples(value):
-        micro = indicator_lookup[micro_id]
-        macro = indicator_lookup[macro_id]
-        if is_trivial_micro_macro_lineage(
-            micro.computation,
-            micro.temporal_aggregation.model_dump(mode="json", exclude_none=True),
-            macro.computation,
-            macro.temporal_aggregation.model_dump(mode="json", exclude_none=True),
-            schema,
-        ):
-            path = (micro_id, meso_id, macro_id)
-            trivial_micro_macro_paths.append(path)
-            errors.append(
-                f"candidate path {micro_id}->{meso_id}->{macro_id}: "
-                "trivial_micro_macro_lineage"
-            )
-    incoming = {item.id: 0 for item in representation.indicators}
-    outgoing = {item.id: 0 for item in representation.indicators}
-    for source, target in edge_pairs:
-        outgoing[source] += 1
-        incoming[target] += 1
-    for indicator in representation.indicators:
-        if indicator.scale == "micro" and outgoing[indicator.id] < 1:
-            errors.append(f"micro indicator {indicator.id} needs an outgoing meso edge")
-        if indicator.scale == "meso" and (
-            incoming[indicator.id] < 1 or outgoing[indicator.id] < 1
-        ):
-            errors.append(f"meso indicator {indicator.id} needs incoming and outgoing edges")
-        if indicator.scale == "macro" and incoming[indicator.id] < 1:
-            errors.append(f"macro indicator {indicator.id} needs an incoming meso edge")
-    edge_count = len(representation.candidate_edges)
-    minimum_edges = int(representation_config["minimum_candidate_edges"])
-    maximum_edges = int(representation_config["maximum_candidate_edges"])
-    if not minimum_edges <= edge_count <= maximum_edges:
-        errors.append(
-            f"candidate edge count {edge_count} must be within [{minimum_edges}, {maximum_edges}]"
-        )
-    indicator_ids = {item.id for item in representation.indicators}
-    prediction_ids: set[str] = set()
-    for prediction in value.prospective_predictions:
-        if prediction.prediction_id in prediction_ids:
-            errors.append(f"duplicate prediction id {prediction.prediction_id}")
-        prediction_ids.add(prediction.prediction_id)
-        if prediction.parameter not in parameter_names:
-            errors.append(f"prediction {prediction.prediction_id}: unknown parameter")
-        elif prediction.source_indicator not in direct_micro_sources[prediction.parameter]:
-            errors.append(
-                f"prediction {prediction.prediction_id}: source must be a direct micro association for its parameter"
-            )
-        referenced = {prediction.source_indicator, *prediction.downstream_indicators}
-        unknown = sorted(referenced - indicator_ids)
-        if unknown:
-            errors.append(
-                f"prediction {prediction.prediction_id}: unknown indicators {unknown}"
-            )
-        if prediction.expected_temporal_order != [
-            prediction.source_indicator,
-            *prediction.downstream_indicators,
-        ]:
-            errors.append(
-                f"prediction {prediction.prediction_id}: temporal order must list source then downstream indicators"
-            )
-        required_path = list(zip(
-            prediction.expected_temporal_order,
-            prediction.expected_temporal_order[1:],
-        ))
-        missing_path = [pair for pair in required_path if pair not in edge_pairs]
-        if missing_path:
-            errors.append(
-                f"prediction {prediction.prediction_id}: ordered path is absent from candidate graph {missing_path}"
-            )
-        criteria = prediction.validation_criteria
-        required_edges = {
-            (item.source, item.target) for item in criteria.required_candidate_edges
-        }
-        if not criteria.required_source_response:
-            errors.append(
-                f"prediction {prediction.prediction_id}: required_source_response must be true"
-            )
-        if not criteria.required_temporal_order:
-            errors.append(
-                f"prediction {prediction.prediction_id}: required_temporal_order must be true"
-            )
-        if not all(criteria.required_downstream_response):
-            errors.append(
-                f"prediction {prediction.prediction_id}: all downstream responses must be required"
-            )
-        if (
-            required_edges != set(required_path)
-            or len(criteria.required_candidate_edges) != len(required_path)
-        ):
-            errors.append(
-                f"prediction {prediction.prediction_id}: required_candidate_edges must "
-                "exactly equal the adjacent expected_temporal_order path"
-            )
-    signatures = [
-        json.dumps(computation_signature(item.computation), sort_keys=True)
-        for item in representation.indicators
-    ]
-    if len(signatures) != len(set(signatures)):
-        errors.append("indicator computations must have unique canonical signatures")
-    lower_boundary = representation.interpretation_boundary.lower()
-    if "temporal" not in lower_boundary or "intervention" not in lower_boundary:
-        errors.append("interpretation_boundary must distinguish later temporal and intervention evidence")
-    return {
-        "valid": not errors,
-        "errors": errors,
-        "scale_counts": scale_counts,
-        "branch_count": len(branches),
-        "complete_paths": paths,
-        "source_field_diversity": len(
-            set().union(*(expression_fields(item.computation) for item in representation.indicators))
-        ),
-        "parameter_coverage": sorted(proposed_parameters),
-        "indicator_count": len(representation.indicators),
-        "candidate_edge_count": len(representation.candidate_edges),
-        "trivial_cross_scale_edge_count": len(trivial_edges),
-        "trivial_micro_macro_lineage_count": len(trivial_micro_macro_paths),
-        "source_families": source_family_by_indicator,
-        "direct_micro_parameter_sources": {
-            name: sorted(sources) for name, sources in direct_micro_sources.items()
-        },
-    }
+def _write_immutable_json(path: Path, value: Any) -> None:
+    _write_immutable(path, json.dumps(value, indent=2, ensure_ascii=False))
 
 
 def _parse_json(text: str) -> dict[str, Any]:
@@ -575,171 +98,955 @@ def _parse_json(text: str) -> dict[str, Any]:
     return json.loads(candidate[start : end + 1])
 
 
-def run_generation(
+def _check_prompt(system: str, user: str) -> None:
+    combined = (system + "\n" + user).lower()
+    leaked = sorted(key for key in FORBIDDEN_PROMPT_KEYS if key in combined)
+    if leaked:
+        raise RuntimeError(f"semantic prompt contains forbidden evidence keys: {leaked}")
+
+
+def _scale_contract() -> dict[str, Any]:
+    return {
+        "micro": "individual, interaction, elementary event, or local primitive process",
+        "meso": (
+            "real district, neighborhood, community, cluster, or local-domain organization; "
+            "an outer mean or sum alone is insufficient"
+        ),
+        "macro": "whole-system collective state or outcome",
+        "operators": {
+            "elementary_or_local": sorted(ELEMENTARY_OR_LOCAL_OPERATORS),
+            "genuine_meso": sorted(GENUINE_MESO_OPERATORS),
+            "global_structure": sorted(GLOBAL_STRUCTURE_OPERATORS),
+            "trivial_wrappers": sorted(TRIVIAL_WRAPPERS),
+        },
+    }
+
+
+def build_indicator_prompt(
     scenario: str,
-    generation_index: int,
-    experiment_config: dict[str, Any],
-    llm_config: dict[str, Any],
+    scenario_spec: dict[str, Any],
+    representation_config: dict[str, Any],
     prompt_template: str,
-    output_root: Path,
-    completion: Callable[[str, str], LLMResponse] | None = None,
-) -> dict[str, Any]:
-    scenario_spec = experiment_config["scenarios"][scenario]
-    rep_config = experiment_config["representation"]
-    system, user = build_prompt(scenario, scenario_spec, rep_config, prompt_template)
-    generation_root = output_root / scenario / f"generation_{generation_index:02d}"
-    generation_root.mkdir(parents=True, exist_ok=True)
-    prompt_content = f"# System\n\n{system}\n\n# User\n\n{user}\n"
-    _write_immutable_text(generation_root / "prompt.md", prompt_content)
-    checkpoint = _load_verified_generation_checkpoint(
-        generation_root,
-        scenario,
-        generation_index,
-        prompt_content,
-        scenario_spec,
-        rep_config,
+) -> tuple[str, str]:
+    contract = prompt_scenario_contract(scenario, scenario_spec)
+    contract.update(
+        {
+            "phase": "indicator_generation",
+            "generic_computation_grammar": grammar_description(),
+            "indicator_budget": representation_config["budget"],
+            "scale_semantics": _scale_contract(),
+            "constraints": [
+                "Return exactly 16 Micro, 8 Meso, and 4 Macro executable indicators.",
+                "Return no candidate edges, candidate paths, or prospective predictions.",
+                "Do not group indicators into arbitrary semantic groups.",
+                "Every controllable parameter needs at least one direct Micro association.",
+                "Use only public simulator semantics and the supplied raw-log schema.",
+                "Do not infer any result from unprovided numerical data.",
+            ],
+        }
     )
-    if checkpoint is not None:
-        return checkpoint
-    if completion is None:
-        client = OpenAICompatibleClient(llm_config)
-        completion = client.complete_json
-    calls: list[dict[str, Any]] = []
-    prior_text = ""
+    system = (
+        prompt_template.strip()
+        + "\nPHASE A ONLY: construct executable multiscale observables. "
+        "Do not propose relationships, mechanism paths, or predictions."
+    )
+    user = (
+        "Input contract:\n"
+        + json.dumps(contract, indent=2, ensure_ascii=False)
+        + "\n\nOutput JSON schema:\n"
+        + json.dumps(IndicatorGeneration.model_json_schema(), indent=2, ensure_ascii=False)
+    )
+    _check_prompt(system, user)
+    return system, user
+
+
+def build_path_prompt(
+    scenario: str,
+    scenario_spec: dict[str, Any],
+    representation_config: dict[str, Any],
+    frozen_indicators: dict[str, Any],
+    indicator_hash: str,
+    prompt_template: str,
+) -> tuple[str, str]:
+    indicators = [
+        {
+            key: item[key]
+            for key in (
+                "id", "semantic_name", "scientific_definition", "scale", "entity_scope",
+                "source_fields", "computation", "parameter_associations",
+            )
+        }
+        for item in frozen_indicators["indicators"]
+    ]
+    contract = {
+        "phase": "path_hypothesis_generation",
+        "scenario": scenario,
+        "public_simulator": prompt_scenario_contract(scenario, scenario_spec),
+        "indicator_set_sha256": indicator_hash,
+        "frozen_indicators": indicators,
+        "candidate_path_bounds": {
+            "minimum": int(representation_config["minimum_candidate_paths"]),
+            "maximum": int(representation_config["maximum_candidate_paths"]),
+        },
+        "constraints": [
+            "Use only the supplied frozen indicator IDs; never create or modify an observable.",
+            "Every hypothesis is a complete parameter to Micro to Meso to Macro mechanism path.",
+            "Cover every controllable parameter with at least four paths.",
+            "Cover every frozen Macro endpoint with at least two paths.",
+            "Do not repeat an identical Micro-Meso-Macro triple.",
+            "Only the primary accepted generation enters Stage 2 and Stage 3.",
+            "Return six prospective predictions bound to candidate_path_id values.",
+            "Do not use or request simulation outcomes.",
+        ],
+    }
+    system = (
+        prompt_template.strip()
+        + "\nPHASE B ONLY: construct complete testable mechanism hypotheses from frozen "
+        "observables. No new observable is permitted."
+    )
+    user = (
+        "Input contract:\n"
+        + json.dumps(contract, indent=2, ensure_ascii=False)
+        + "\n\nOutput JSON schema:\n"
+        + json.dumps(PathGeneration.model_json_schema(), indent=2, ensure_ascii=False)
+    )
+    _check_prompt(system, user)
+    return system, user
+
+
+def build_prompt(
+    scenario: str,
+    scenario_spec: dict[str, Any],
+    representation_config: dict[str, Any],
+    prompt_template: str,
+) -> tuple[str, str]:
+    """Compatibility name now resolves exclusively to Phase A."""
+    return build_indicator_prompt(
+        scenario, scenario_spec, representation_config, prompt_template
+    )
+
+
+def validate_indicator_generation(
+    value: IndicatorGeneration,
+    scenario: str,
+    scenario_spec: dict[str, Any],
+    representation_config: dict[str, Any],
+) -> dict[str, Any]:
     errors: list[str] = []
-    accepted: SemanticGeneration | None = None
-    accepted_validation: dict[str, Any] | None = None
+    if value.scenario != scenario:
+        errors.append(f"scenario must be {scenario}")
+    counts = {
+        scale: sum(item.scale == scale for item in value.indicators)
+        for scale in ("micro", "meso", "macro")
+    }
+    for scale, required in representation_config["budget"].items():
+        if counts.get(scale, 0) != int(required):
+            errors.append(f"scale {scale} requires exactly {required} indicators")
+    schema = raw_schema(scenario)
+    levels = {str(item["field_name"]): str(item.get("entity_level", "")) for item in schema}
+    signatures: list[str] = []
+    direct: dict[str, set[str]] = {
+        name: set() for name in scenario_spec["interventions"]
+    }
+    families: dict[str, list[str]] = {}
+    for indicator in value.indicators:
+        try:
+            validate_indicator_expression(indicator.computation, schema)
+            validate_temporal_aggregation(
+                indicator.temporal_aggregation.model_dump(mode="json", exclude_none=True)
+            )
+        except DSLValidationError as exc:
+            errors.append(f"indicator {indicator.id}: {exc}")
+        actual_fields = expression_fields(indicator.computation)
+        if actual_fields != set(indicator.source_fields):
+            errors.append(
+                f"indicator {indicator.id}: source_fields must equal AST fields {sorted(actual_fields)}"
+            )
+        if indicator.entity_scope not in SCALE_ENTITY_SCOPES[indicator.scale]:
+            errors.append(
+                f"indicator {indicator.id}: invalid {indicator.scale} entity scope"
+            )
+        if indicator.scale == "micro" and not any(
+            levels.get(field) in {"agent", "interaction", "cell", "edge"}
+            for field in actual_fields
+        ):
+            errors.append(f"indicator {indicator.id}: Micro lacks an elementary primitive")
+        global_ops = sorted(global_structure_operators(indicator.computation))
+        if indicator.scale in {"micro", "meso"} and global_ops:
+            errors.append(
+                f"indicator {indicator.id}: global structure invalid for {indicator.scale}: {global_ops}"
+            )
+        if indicator.scale == "meso" and not is_genuine_meso_expression(indicator.computation):
+            errors.append(f"indicator {indicator.id}: Meso lacks non-trivial organization")
+        for association in indicator.parameter_associations:
+            if association.parameter not in scenario_spec["interventions"]:
+                errors.append(f"indicator {indicator.id}: unknown parameter {association.parameter}")
+            elif association.relationship == "direct" and indicator.scale == "micro":
+                direct[association.parameter].add(indicator.id)
+        signatures.append(json.dumps(computation_signature(indicator.computation), sort_keys=True))
+        families[indicator.id] = sorted(expression_primitive_families(indicator.computation, schema))
+    if len(signatures) != len(set(signatures)):
+        errors.append("indicator computations require unique canonical signatures")
+    missing_direct = sorted(name for name, sources in direct.items() if not sources)
+    if representation_config.get("require_all_parameters_associated", True) and missing_direct:
+        errors.append(f"parameters require a direct Micro indicator: {missing_direct}")
+    lower_boundary = value.interpretation_boundary.lower()
+    if "temporal" not in lower_boundary or "intervention" not in lower_boundary:
+        errors.append("interpretation_boundary must defer temporal and intervention evidence")
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "scale_counts": counts,
+        "indicator_count": len(value.indicators),
+        "source_field_diversity": len(set().union(*(
+            expression_fields(item.computation) for item in value.indicators
+        ))),
+        "direct_micro_parameter_sources": {
+            name: sorted(sources) for name, sources in direct.items()
+        },
+        "source_families": families,
+        "meso_structural_diversity": len({
+            signatures[index] for index, item in enumerate(value.indicators)
+            if item.scale == "meso"
+        }),
+        "macro_concept_diversity": len({
+            item.semantic_name.strip().lower() for item in value.indicators
+            if item.scale == "macro"
+        }),
+    }
+
+
+def validate_generation(
+    value: Any,
+    scenario: str,
+    scenario_spec: dict[str, Any],
+    representation_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate a legacy combined fixture through both new phase contracts.
+
+    Production LLM calls never use this compatibility entry point.  Keeping it
+    strict lets historical DSL tests exercise Phase A indicator validation and
+    Phase B path-lineage validation without restoring the old combined schema.
+    """
+    if isinstance(value, IndicatorGeneration):
+        indicator_value = value
+        raw: dict[str, Any] = value.model_dump(mode="json", exclude_none=True)
+    else:
+        payload = value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+        raw = payload.get("representation", payload)
+        indicator_payload = {
+            key: raw[key]
+            for key in ("scenario", "phenomenon", "indicators", "interpretation_boundary")
+            if key in raw
+        }
+        indicator_value = IndicatorGeneration.model_validate(indicator_payload)
+    result = validate_indicator_generation(
+        indicator_value, scenario, scenario_spec, representation_config
+    )
+    result["trivial_micro_macro_lineage_count"] = 0
+    paths = raw.get("candidate_paths", [])
+    if not paths:
+        return result
+    prospective_source = (
+        value.model_dump(mode="json").get("prospective_predictions", [])
+        if hasattr(value, "model_dump")
+        else []
+    )
+    prospective = [
+        {
+            key: item[key]
+            for key in (
+                "prediction_id", "candidate_path_id", "prospective_priority",
+                "scientific_rationale", "falsification_condition",
+            )
+            if key in item
+        }
+        for item in prospective_source
+    ]
+    try:
+        generation = PathGeneration.model_validate(
+            {
+                "scenario": scenario,
+                "indicator_set_sha256": sha256_json(
+                    indicator_value.model_dump(mode="json", exclude_none=True)
+                ),
+                "candidate_paths": paths,
+                "prospective_predictions": prospective,
+            }
+        )
+        path_result = validate_path_generation(
+            generation,
+            indicator_value,
+            generation.indicator_set_sha256,
+            scenario_spec,
+            representation_config,
+        )
+        result["errors"].extend(path_result["errors"])
+        result["candidate_path_count"] = path_result["candidate_path_count"]
+        result["parameter_path_coverage"] = path_result["parameter_path_coverage"]
+        result["macro_path_coverage"] = path_result["macro_path_coverage"]
+        result["trivial_micro_macro_lineage_count"] = sum(
+            "trivial Micro-Macro lineage" in error for error in path_result["errors"]
+        )
+    except ValidationError as exc:
+        result["errors"].append(str(exc))
+    result["valid"] = not result["errors"]
+    return result
+
+
+def validate_path_generation(
+    value: PathGeneration,
+    indicators: IndicatorGeneration,
+    indicator_hash: str,
+    scenario_spec: dict[str, Any],
+    representation_config: dict[str, Any],
+) -> dict[str, Any]:
+    errors: list[str] = []
+    if value.scenario != indicators.scenario:
+        errors.append("path scenario does not match frozen indicators")
+    if value.indicator_set_sha256 != indicator_hash:
+        errors.append("path indicator input hash does not match frozen indicator hash")
+    lookup = {item.id: item for item in indicators.indicators}
+    minimum = int(representation_config["minimum_candidate_paths"])
+    maximum = int(representation_config["maximum_candidate_paths"])
+    if not minimum <= len(value.candidate_paths) <= maximum:
+        errors.append(f"candidate path count must be within [{minimum}, {maximum}]")
+    parameter_counts = {name: 0 for name in scenario_spec["interventions"]}
+    macro_counts = {
+        item.id: 0 for item in indicators.indicators if item.scale == "macro"
+    }
+    schema = raw_schema(indicators.scenario)
+    for path in value.candidate_paths:
+        nodes = (path.micro_indicator, path.meso_indicator, path.macro_indicator)
+        unknown = sorted(set(nodes) - set(lookup))
+        if unknown:
+            errors.append(f"path {path.path_id}: unknown frozen indicator IDs {unknown}")
+            continue
+        expected_scales = ("micro", "meso", "macro")
+        actual_scales = tuple(lookup[node].scale for node in nodes)
+        if actual_scales != expected_scales:
+            errors.append(f"path {path.path_id}: expected Micro-Meso-Macro references")
+        if path.parameter not in parameter_counts:
+            errors.append(f"path {path.path_id}: unknown controllable parameter")
+        else:
+            parameter_counts[path.parameter] += 1
+            direct = {
+                item.parameter
+                for item in lookup[path.micro_indicator].parameter_associations
+                if item.relationship == "direct"
+            }
+            if path.parameter not in direct:
+                errors.append(
+                    f"path {path.path_id}: Micro source lacks direct parameter association"
+                )
+        macro_counts[path.macro_indicator] += 1
+        micro, meso, macro = (lookup[node] for node in nodes)
+        if is_trivial_cross_scale_transform(
+            micro.computation,
+            micro.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+            meso.computation,
+            meso.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+        ) or is_trivial_cross_scale_transform(
+            meso.computation,
+            meso.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+            macro.computation,
+            macro.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+        ):
+            errors.append(f"path {path.path_id}: trivial cross-scale transform")
+        if is_trivial_micro_macro_lineage(
+            micro.computation,
+            micro.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+            macro.computation,
+            macro.temporal_aggregation.model_dump(mode="json", exclude_none=True),
+            schema,
+        ):
+            errors.append(f"path {path.path_id}: trivial Micro-Macro lineage")
+    minimum_per_parameter = int(
+        representation_config.get("minimum_paths_per_parameter", 4)
+    )
+    sparse_parameters = sorted(
+        name for name, count in parameter_counts.items()
+        if count < minimum_per_parameter
+    )
+    if sparse_parameters:
+        errors.append(
+            f"parameters require at least {minimum_per_parameter} paths: {sparse_parameters}"
+        )
+    minimum_per_macro = int(representation_config.get("minimum_paths_per_macro", 2))
+    sparse_macros = sorted(
+        name for name, count in macro_counts.items() if count < minimum_per_macro
+    )
+    if sparse_macros:
+        errors.append(
+            f"Macro indicators require at least {minimum_per_macro} paths: {sparse_macros}"
+        )
+    expected_predictions = int(representation_config.get("prospective_prediction_count", 6))
+    if len(value.prospective_predictions) != expected_predictions:
+        errors.append(f"exactly {expected_predictions} prospective predictions are required")
+    prediction_paths = {
+        path.path_id: path for path in value.candidate_paths
+    }
+    prediction_parameters = {
+        prediction_paths[item.candidate_path_id].parameter
+        for item in value.prospective_predictions
+        if item.candidate_path_id in prediction_paths
+    }
+    if prediction_parameters != set(parameter_counts):
+        errors.append("prospective predictions must cover every controllable parameter")
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "candidate_path_count": len(value.candidate_paths),
+        "parameter_path_coverage": parameter_counts,
+        "macro_path_coverage": macro_counts,
+        "prospective_prediction_count": len(value.prospective_predictions),
+    }
+
+
+def derive_candidate_edges(paths: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    projected: dict[tuple[str, str], dict[str, Any]] = {}
+    for path in paths:
+        macro = str(path["macro_indicator"])
+        group = f"macro_outcome_{macro}"
+        for source, target, direction in (
+            (
+                str(path["micro_indicator"]), str(path["meso_indicator"]),
+                str(path["micro_to_meso_expected_direction"]),
+            ),
+            (
+                str(path["meso_indicator"]), macro,
+                str(path["meso_to_macro_expected_direction"]),
+            ),
+        ):
+            item = projected.setdefault(
+                (source, target),
+                {
+                    "source": source,
+                    "target": target,
+                    "expected_direction": direction,
+                    "hypothesis_group_ids": [],
+                    "path_ids": [],
+                },
+            )
+            if item["expected_direction"] != direction:
+                item["expected_direction"] = "mixed"
+            item["hypothesis_group_ids"].append(group)
+            item["path_ids"].append(str(path["path_id"]))
+    result = []
+    for item in projected.values():
+        item["hypothesis_group_ids"] = sorted(set(item["hypothesis_group_ids"]))
+        item["path_ids"] = sorted(set(item["path_ids"]))
+        result.append(CandidateEdge.model_validate(item).model_dump(mode="json"))
+    return sorted(result, key=lambda item: (item["source"], item["target"]))
+
+
+def _run_generation_call(
+    *,
+    root: Path,
+    model: type[BaseModel],
+    validator: Callable[[Any], dict[str, Any]],
+    system: str,
+    user: str,
+    maximum_repairs: int,
+    completion: Callable[[str, str], LLMResponse] | None,
+    llm_config: dict[str, Any],
+) -> dict[str, Any]:
+    root.mkdir(parents=True, exist_ok=True)
+    prompt_text = f"# System\n\n{system}\n\n# User\n\n{user}\n"
+    _write_immutable(root / "prompt.md", prompt_text)
+    completed_path = root / "accepted_payload.json"
+    completed_hash_path = root / "accepted_payload.sha256"
+    result_path = root / "generation_result.json"
+    if completed_path.is_file() or completed_hash_path.is_file():
+        if not completed_path.is_file() or not completed_hash_path.is_file():
+            raise RuntimeError(f"incomplete immutable generation checkpoint: {root}")
+        if _sha256_path(completed_path) != completed_hash_path.read_text(encoding="utf-8").strip():
+            raise RuntimeError(f"accepted semantic payload hash mismatch: {root}")
+        value = model.model_validate_json(completed_path.read_text(encoding="utf-8"))
+        validation = validator(value)
+        if not validation["valid"]:
+            raise RuntimeError(f"frozen semantic payload no longer validates: {validation['errors']}")
+        return json.loads(result_path.read_text(encoding="utf-8"))
+    client = None if completion else OpenAICompatibleClient(llm_config)
+    errors: list[str] = []
+    prior = ""
     started = time.perf_counter()
-    for repair_round in range(int(rep_config["maximum_repair_rounds"]) + 1):
+    for repair_round in range(maximum_repairs + 1):
         repair = ""
         if repair_round:
             repair = (
-                "\n\nThe previous JSON was rejected only for the following schema or executability errors:\n"
+                "\n\nThe previous response failed only these schema/executability checks:\n"
                 + json.dumps(errors, indent=2, ensure_ascii=False)
-                + "\nReturn a complete corrected object. Do not infer or request simulation outcomes.\nPrevious object:\n"
-                + prior_text
+                + "\nReturn a complete corrected object without using simulation outcomes.\n"
+                + prior
             )
         request = user + repair
-        request_path = generation_root / f"request_round_{repair_round:02d}.md"
-        _write_immutable_text(
-            request_path,
+        _write_immutable(
+            root / f"request_round_{repair_round:02d}.md",
             f"# System\n\n{system}\n\n# User\n\n{request}\n",
         )
-        call_started = time.perf_counter()
-        response_path = generation_root / f"response_round_{repair_round:02d}.json"
-        existing_response = (
-            json.loads(response_path.read_text(encoding="utf-8"))
-            if response_path.is_file()
-            else None
-        )
-        try:
-            if existing_response is None:
-                response = completion(system, request)
-            else:
-                previous_call = existing_response["call"]
-                response = LLMResponse(
-                    text=str(existing_response["raw_text"]),
-                    input_tokens=int(previous_call["input_tokens"]),
-                    output_tokens=int(previous_call["output_tokens"]),
-                    model=str(previous_call["model"]),
-                )
-            prior_text = response.text
-            parsed = _parse_json(response.text)
-            value = SemanticGeneration.model_validate(parsed)
-            validation = validate_generation(value, scenario, scenario_spec, rep_config)
-            errors = list(validation["errors"])
-            status = "accepted" if validation["valid"] else "validator_rejected"
-            if validation["valid"]:
-                accepted = value
-                accepted_validation = validation
-        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-            parsed = None
-            validation = {"valid": False, "errors": [f"{type(exc).__name__}: {exc}"]}
-            errors = list(validation["errors"])
-            status = "schema_rejected"
-            if existing_response is None:
-                response = LLMResponse("", 0, 0, str(llm_config["model"]))
-        call = (
-            existing_response["call"]
-            if existing_response is not None
-            else {
-                "repair_round": repair_round,
-                "status": status,
-                "duration_seconds": time.perf_counter() - call_started,
+        response_record_path = root / f"response_round_{repair_round:02d}.json"
+        if response_record_path.is_file():
+            record = json.loads(response_record_path.read_text(encoding="utf-8"))
+            response = LLMResponse(
+                text=str(record["raw_text"]),
+                input_tokens=int(record["input_tokens"]),
+                output_tokens=int(record["output_tokens"]),
+                model=str(record["model"]),
+            )
+        else:
+            response = completion(system, request) if completion else client.complete_json(system, request)
+            record = {
+                "raw_text": response.text,
                 "input_tokens": response.input_tokens,
                 "output_tokens": response.output_tokens,
                 "model": response.model,
-                "validation": validation,
             }
-        )
-        if call["status"] != status:
-            raise RuntimeError(f"stored response validation status changed: {response_path}")
-        calls.append(call)
-        if existing_response is None:
-            _write_immutable_text(
-                response_path,
-                json.dumps(
-                {"raw_text": response.text, "parsed_json": parsed, "call": call},
-                indent=2,
-                ensure_ascii=False,
-                ),
+            _write_immutable(
+                response_record_path,
+                json.dumps(record, indent=2, ensure_ascii=False),
             )
-        if accepted is not None:
-            break
-    payload = {
-        "scenario": scenario,
-        "generation": generation_index,
-        "status": "accepted" if accepted is not None else "rejected",
-        "duration_seconds": time.perf_counter() - started,
-        "repair_rounds": sum(call["status"] != "accepted" for call in calls),
-        "accepted_generation": accepted.model_dump(mode="json", exclude_none=True) if accepted else None,
-        "validation": accepted_validation,
-        "calls": calls,
+        prior = response.text
+        try:
+            value = model.model_validate(_parse_json(response.text))
+            validation = validator(value)
+            errors = list(validation["errors"])
+        except (ValueError, ValidationError, json.JSONDecodeError) as exc:
+            value = None
+            validation = {"valid": False, "errors": [str(exc)]}
+            errors = list(validation["errors"])
+        if value is not None and validation["valid"]:
+            accepted = value.model_dump(mode="json", exclude_none=True)
+            _write_immutable(
+                completed_path, json.dumps(accepted, indent=2, ensure_ascii=False)
+            )
+            _write_immutable(completed_hash_path, _sha256_path(completed_path) + "\n")
+            result = {
+                "status": "accepted",
+                "repair_rounds": repair_round,
+                "validation": validation,
+                "accepted_generation": accepted,
+                "elapsed_seconds": time.perf_counter() - started,
+            }
+            _write_immutable(result_path, json.dumps(result, indent=2, ensure_ascii=False))
+            return result
+    result = {
+        "status": "rejected",
+        "repair_rounds": maximum_repairs,
+        "validation": {"valid": False, "errors": errors},
+        "accepted_generation": None,
+        "elapsed_seconds": time.perf_counter() - started,
     }
-    return _write_generation_checkpoint(generation_root, payload)
+    _write_immutable(result_path, json.dumps(result, indent=2, ensure_ascii=False))
+    return result
+
+
+def _completion_for(
+    provider: Callable[..., Callable[[str, str], LLMResponse]] | None,
+    scenario: str,
+    index: int,
+    phase: str,
+) -> Callable[[str, str], LLMResponse] | None:
+    if provider is None:
+        return None
+    try:
+        return provider(scenario, index, phase)
+    except TypeError:
+        return provider(scenario, index)
+
+
+def _indicator_selection_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    validation = item["validation"]
+    return (
+        -int(validation["source_field_diversity"]),
+        -sum(bool(value) for value in validation["direct_micro_parameter_sources"].values()),
+        -int(validation["meso_structural_diversity"]),
+        -int(validation["macro_concept_diversity"]),
+        int(item["repair_rounds"]),
+        sha256_json(item["accepted_generation"]),
+    )
 
 
 def _jaccard(first: set[Any], second: set[Any]) -> float:
-    if not first and not second:
-        return 1.0
-    return len(first & second) / len(first | second)
+    return 1.0 if not first and not second else len(first & second) / len(first | second)
 
 
-def _agreement(accepted: list[dict[str, Any]]) -> dict[str, Any]:
-    if len(accepted) < 2:
-        return {"computation_signature_jaccard": None, "semantic_edge_jaccard": None}
-    signatures: list[set[str]] = []
-    edges: list[set[tuple[str, str]]] = []
-    for item in accepted:
-        generation = item["accepted_generation"]
-        by_id = {
-            node["id"]: json.dumps(computation_signature(node["computation"]), sort_keys=True)
-            for node in generation["representation"]["indicators"]
+def _write_indicator_replication(
+    root: Path, generations: dict[str, list[dict[str, Any]]]
+) -> None:
+    rows: list[dict[str, Any]] = []
+    summary: dict[str, Any] = {"schema_version": "2.0", "scenarios": {}}
+    for scenario, items in sorted(generations.items()):
+        pair_rows = []
+        for left, right in combinations(items, 2):
+            first = left["accepted_generation"]["indicators"]
+            second = right["accepted_generation"]["indicators"]
+            def signatures(values: list[dict[str, Any]]) -> set[str]:
+                return {
+                    json.dumps(computation_signature(item["computation"]), sort_keys=True)
+                    for item in values
+                }
+            row = {
+                "scenario": scenario,
+                "generation_a": left["generation"],
+                "generation_b": right["generation"],
+                "computation_agreement": _jaccard(signatures(first), signatures(second)),
+                "scale_agreement": _jaccard(
+                    {(item["scale"], json.dumps(computation_signature(item["computation"]), sort_keys=True)) for item in first},
+                    {(item["scale"], json.dumps(computation_signature(item["computation"]), sort_keys=True)) for item in second},
+                ),
+                "source_family_agreement": _jaccard(
+                    {tuple(item["source_fields"]) for item in first},
+                    {tuple(item["source_fields"]) for item in second},
+                ),
+                "parameter_source_agreement": _jaccard(
+                    {(assoc["parameter"], item["id"]) for item in first for assoc in item["parameter_associations"] if assoc["relationship"] == "direct"},
+                    {(assoc["parameter"], item["id"]) for item in second for assoc in item["parameter_associations"] if assoc["relationship"] == "direct"},
+                ),
+                "macro_concept_agreement": _jaccard(
+                    {item["semantic_name"].lower() for item in first if item["scale"] == "macro"},
+                    {item["semantic_name"].lower() for item in second if item["scale"] == "macro"},
+                ),
+            }
+            rows.append(row)
+            pair_rows.append(row)
+        summary["scenarios"][scenario] = {
+            key: (sum(float(row[key]) for row in pair_rows) / len(pair_rows) if pair_rows else None)
+            for key in (
+                "computation_agreement", "scale_agreement", "source_family_agreement",
+                "parameter_source_agreement", "macro_concept_agreement",
+            )
         }
-        signatures.append(set(by_id.values()))
-        edges.append(
-            {(by_id[edge["source"]], by_id[edge["target"]]) for edge in generation["representation"]["candidate_edges"]}
+    pd.DataFrame(rows).to_csv(root / "indicator_replication_pairwise.csv", index=False)
+    _atomic_json(root / "representation_agreement.json", summary)
+
+
+def _write_path_replication(
+    root: Path, generations: dict[str, list[dict[str, Any]]]
+) -> None:
+    rows: list[dict[str, Any]] = []
+    summary: dict[str, Any] = {"schema_version": "1.0", "scenarios": {}}
+    metrics = (
+        "exact_path_jaccard", "micro_meso_edge_jaccard", "meso_macro_edge_jaccard",
+        "parameter_path_coverage", "macro_path_coverage", "direction_agreement",
+    )
+    for scenario, items in sorted(generations.items()):
+        pair_rows = []
+        for left, right in combinations(items, 2):
+            first = left["accepted_generation"]["candidate_paths"]
+            second = right["accepted_generation"]["candidate_paths"]
+            exact_a = {(p["micro_indicator"], p["meso_indicator"], p["macro_indicator"], p["parameter"]) for p in first}
+            exact_b = {(p["micro_indicator"], p["meso_indicator"], p["macro_indicator"], p["parameter"]) for p in second}
+            shared = exact_a & exact_b
+            first_by = {(p["micro_indicator"], p["meso_indicator"], p["macro_indicator"], p["parameter"]): p for p in first}
+            second_by = {(p["micro_indicator"], p["meso_indicator"], p["macro_indicator"], p["parameter"]): p for p in second}
+            direction = (
+                sum(
+                    first_by[key]["micro_to_meso_expected_direction"] == second_by[key]["micro_to_meso_expected_direction"]
+                    and first_by[key]["meso_to_macro_expected_direction"] == second_by[key]["meso_to_macro_expected_direction"]
+                    for key in shared
+                ) / len(shared)
+                if shared else 0.0
+            )
+            row = {
+                "scenario": scenario,
+                "generation_a": left["generation"],
+                "generation_b": right["generation"],
+                "exact_path_jaccard": _jaccard(exact_a, exact_b),
+                "micro_meso_edge_jaccard": _jaccard(
+                    {(p["micro_indicator"], p["meso_indicator"]) for p in first},
+                    {(p["micro_indicator"], p["meso_indicator"]) for p in second},
+                ),
+                "meso_macro_edge_jaccard": _jaccard(
+                    {(p["meso_indicator"], p["macro_indicator"]) for p in first},
+                    {(p["meso_indicator"], p["macro_indicator"]) for p in second},
+                ),
+                "parameter_path_coverage": _jaccard(
+                    {p["parameter"] for p in first}, {p["parameter"] for p in second}
+                ),
+                "macro_path_coverage": _jaccard(
+                    {p["macro_indicator"] for p in first}, {p["macro_indicator"] for p in second}
+                ),
+                "direction_agreement": direction,
+            }
+            rows.append(row)
+            pair_rows.append(row)
+        summary["scenarios"][scenario] = {
+            key: (sum(float(row[key]) for row in pair_rows) / len(pair_rows) if pair_rows else None)
+            for key in metrics
+        }
+    pd.DataFrame(rows).to_csv(root / "path_replication_pairwise.csv", index=False)
+    _atomic_json(root / "path_replication_agreement.json", summary)
+
+
+def _semantic_guard(run_root: Path) -> None:
+    if any((run_root / "data").glob("*baseline_simulation_manifest.json")):
+        raise RuntimeError("baseline already started; semantic stages are immutable")
+
+
+def run_indicator_generation_stage(
+    experiment_config: dict[str, Any],
+    llm_config_path: Path,
+    run_root: Path,
+    prompt_template_path: Path,
+    workers: int,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+    completion_provider: Callable[..., Callable[[str, str], LLMResponse]] | None = None,
+) -> dict[str, Any]:
+    """Run Phase A only and save the data-blind selected indicator payload."""
+
+    del workers
+    _semantic_guard(run_root)
+    llm_config = load_llm_config(llm_config_path, require_key=completion_provider is None)
+    template = prompt_template_path.read_text(encoding="utf-8")
+    rep_config = experiment_config["representation"]
+    selection_count = int(experiment_config["semantic_replication"]["selection_generations"])
+    indicator_replication_count = int(
+        experiment_config["semantic_replication"]["replication_only_generations"]
+    )
+    path_replication_count = int(
+        experiment_config.get("path_replication", {}).get("replication_only_generations", 2)
+    )
+    maximum_repairs = int(rep_config["maximum_repair_rounds"])
+    histories = run_root / "llm"
+    representation_root = run_root / "representation"
+    representation_root.mkdir(parents=True, exist_ok=True)
+    indicator_generations: dict[str, list[dict[str, Any]]] = {}
+    selected_indicators: dict[str, dict[str, Any]] = {}
+    validation_bundle: dict[str, Any] = {
+        "schema_version": "4.0-two-phase-path-centered",
+        "phase": "indicator_generation",
+    }
+    total_indicator_calls = len(experiment_config["scenarios"]) * (
+        selection_count + indicator_replication_count
+    )
+    done = 0
+    for scenario, scenario_spec in sorted(experiment_config["scenarios"].items()):
+        system, user = build_indicator_prompt(scenario, scenario_spec, rep_config, template)
+        results = []
+        for index in range(selection_count + indicator_replication_count):
+            result = _run_generation_call(
+                root=histories / "indicator" / scenario / f"generation_{index:02d}",
+                model=IndicatorGeneration,
+                validator=lambda value, s=scenario, spec=scenario_spec: validate_indicator_generation(value, s, spec, rep_config),
+                system=system,
+                user=user,
+                maximum_repairs=maximum_repairs,
+                completion=_completion_for(completion_provider, scenario, index, "indicator"),
+                llm_config=llm_config,
+            )
+            result["generation"] = index
+            result["generation_role"] = "selection_eligible" if index < selection_count else "replication_only"
+            results.append(result)
+            done += 1
+            if progress_callback:
+                progress_callback("Indicator generations", done, total_indicator_calls)
+        accepted = [item for item in results if item["status"] == "accepted"]
+        eligible = [item for item in accepted if item["generation"] < selection_count]
+        if not eligible:
+            raise RuntimeError(f"no valid selection-eligible indicator generation for {scenario}")
+        selected = min(eligible, key=_indicator_selection_key)
+        selected_indicators[scenario] = selected["accepted_generation"]
+        indicator_generations[scenario] = accepted
+        validation_bundle[scenario] = {
+            "selected_indicator_generation": selected["generation"],
+            "indicator_selection_rule": rep_config["selection_rule"],
+            "indicator_selection_key": list(_indicator_selection_key(selected)),
+            "selection_used_simulation_data": False,
+            "indicator_generations": [
+                {
+                    "generation": item["generation"],
+                    "generation_role": item["generation_role"],
+                    "status": item["status"],
+                    "repair_rounds": item["repair_rounds"],
+                    "validation": item["validation"],
+                }
+                for item in results
+            ],
+        }
+    _write_indicator_replication(representation_root, indicator_generations)
+    selection = {
+        "schema_version": "1.0",
+        "selection_used_simulation_data": False,
+        "capacity_control": rep_config["budget"],
+        "scenarios": selected_indicators,
+    }
+    _write_immutable_json(representation_root / "indicator_selection.json", selection)
+    _write_immutable_json(
+        representation_root / "indicator_generation_validation.json",
+        validation_bundle,
+    )
+    return validation_bundle
+
+
+def freeze_indicator_stage(
+    experiment_config: dict[str, Any], run_root: Path
+) -> dict[str, Any]:
+    """Freeze the selected Phase A payload before any path call is allowed."""
+
+    _semantic_guard(run_root)
+    representation_root = run_root / "representation"
+    selection_path = representation_root / "indicator_selection.json"
+    if not selection_path.is_file():
+        raise FileNotFoundError("indicator selection is missing")
+    selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    expected = set(experiment_config["scenarios"])
+    if set(selection.get("scenarios", {})) != expected:
+        raise RuntimeError("indicator selection scenario set does not match configuration")
+    for scenario, payload in selection["scenarios"].items():
+        value = IndicatorGeneration.model_validate(payload)
+        validation = validate_indicator_generation(
+            value,
+            scenario,
+            experiment_config["scenarios"][scenario],
+            experiment_config["representation"],
         )
-    pairs = list(combinations(range(len(accepted)), 2))
+        if not validation["valid"]:
+            raise RuntimeError(f"selected indicators no longer validate: {validation['errors']}")
+    indicators_bundle = {
+        "schema_version": "1.0",
+        "capacity_control": experiment_config["representation"]["budget"],
+        "scenarios": selection["scenarios"],
+    }
+    indicators_path = representation_root / "indicators_frozen.json"
+    _write_immutable_json(indicators_path, indicators_bundle)
+    digest = _sha256_path(indicators_path)
+    _write_immutable(representation_root / "INDICATORS_FROZEN.sha256", digest + "\n")
     return {
-        "computation_signature_jaccard": sum(
-            _jaccard(signatures[a], signatures[b]) for a, b in pairs
-        )
-        / len(pairs),
-        "semantic_edge_jaccard": sum(_jaccard(edges[a], edges[b]) for a, b in pairs)
-        / len(pairs),
+        "indicators_frozen": True,
+        "scenario_count": len(expected),
+        "indicators_frozen_sha256": digest,
     }
 
 
-def _selection_key(payload: dict[str, Any]) -> tuple[Any, ...]:
-    validation = payload["validation"]
-    canonical_hash = sha256_json(payload["accepted_generation"])
-    return (
-        -int(validation["source_field_diversity"]),
-        -sum(int(value) for value in validation["complete_paths"].values()),
-        int(payload["repair_rounds"]),
-        canonical_hash,
+def run_path_generation_stage(
+    experiment_config: dict[str, Any],
+    llm_config_path: Path,
+    run_root: Path,
+    prompt_template_path: Path,
+    workers: int,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+    completion_provider: Callable[..., Callable[[str, str], LLMResponse]] | None = None,
+) -> dict[str, Any]:
+    """Run Phase B only against the immutable Phase A indicator set."""
+
+    del workers
+    _semantic_guard(run_root)
+    llm_config = load_llm_config(llm_config_path, require_key=completion_provider is None)
+    template = prompt_template_path.read_text(encoding="utf-8")
+    rep_config = experiment_config["representation"]
+    path_replication_count = int(
+        experiment_config.get("path_replication", {}).get("replication_only_generations", 2)
     )
+    maximum_repairs = int(rep_config["maximum_repair_rounds"])
+    histories = run_root / "llm"
+    representation_root = run_root / "representation"
+    indicators_path = representation_root / "indicators_frozen.json"
+    marker = representation_root / "INDICATORS_FROZEN.sha256"
+    if not indicators_path.is_file() or not marker.is_file():
+        raise FileNotFoundError("frozen indicator artifacts are incomplete")
+    indicator_bundle_hash = _sha256_path(indicators_path)
+    if marker.read_text(encoding="utf-8").strip() != indicator_bundle_hash:
+        raise RuntimeError("frozen indicator hash mismatch")
+    indicator_bundle = json.loads(indicators_path.read_text(encoding="utf-8"))
+    selected_indicators = indicator_bundle["scenarios"]
+    validation_path = representation_root / "indicator_generation_validation.json"
+    validation_bundle: dict[str, Any] = json.loads(
+        validation_path.read_text(encoding="utf-8")
+    )
+
+    primary_paths: dict[str, list[dict[str, Any]]] = {}
+    prospective: dict[str, list[dict[str, Any]]] = {}
+    derived: dict[str, list[dict[str, Any]]] = {}
+    path_generations: dict[str, list[dict[str, Any]]] = {}
+    total_path_calls = len(experiment_config["scenarios"]) * (1 + path_replication_count)
+    done = 0
+    for scenario, scenario_spec in sorted(experiment_config["scenarios"].items()):
+        indicator_value = IndicatorGeneration.model_validate(selected_indicators[scenario])
+        scenario_indicator_hash = sha256_json(selected_indicators[scenario])
+        system, user = build_path_prompt(
+            scenario, scenario_spec, rep_config, selected_indicators[scenario],
+            scenario_indicator_hash, template,
+        )
+        accepted = []
+        for index in range(1 + path_replication_count):
+            result = _run_generation_call(
+                root=histories / "path" / scenario / f"generation_{index:02d}",
+                model=PathGeneration,
+                validator=lambda value, indicators=indicator_value, digest=scenario_indicator_hash, spec=scenario_spec: validate_path_generation(value, indicators, digest, spec, rep_config),
+                system=system,
+                user=user,
+                maximum_repairs=maximum_repairs,
+                completion=_completion_for(completion_provider, scenario, index, "path"),
+                llm_config=llm_config,
+            )
+            result["generation"] = index
+            result["generation_role"] = "primary" if index == 0 else "replication_only"
+            if result["status"] == "accepted":
+                accepted.append(result)
+            done += 1
+            if progress_callback:
+                progress_callback("Path generations", done, total_path_calls)
+        primary = next((item for item in accepted if item["generation"] == 0), None)
+        if primary is None:
+            raise RuntimeError(f"primary path generation was not accepted for {scenario}")
+        path_generations[scenario] = accepted
+        payload = primary["accepted_generation"]
+        primary_paths[scenario] = payload["candidate_paths"]
+        prospective[scenario] = payload["prospective_predictions"]
+        derived[scenario] = derive_candidate_edges(payload["candidate_paths"])
+        representation = StructuredRepresentation.model_validate(
+            {
+                **selected_indicators[scenario],
+                "candidate_paths": primary_paths[scenario],
+                "candidate_edges": derived[scenario],
+            }
+        ).model_dump(mode="json", exclude_none=True)
+        _write_immutable_json(
+            representation_root / f"{scenario}_representation.json", representation
+        )
+        validation_bundle[scenario].update(
+            {
+                "indicator_set_sha256": scenario_indicator_hash,
+                "primary_path_generation": 0,
+                "path_selection_rule": "first accepted valid generation only",
+                "path_selection_used_simulation_data": False,
+                "path_generation_validation": primary["validation"],
+                "path_replication_only_generation_count": path_replication_count,
+            }
+        )
+    candidate_paths_bundle = {"schema_version": "1.0", "scenarios": primary_paths}
+    derived_edges_bundle = {
+        "schema_version": "1.0",
+        "derivation": "deterministic projection of frozen candidate paths",
+        "scenarios": derived,
+    }
+    prospective_bundle = {"schema_version": "2.0", "scenarios": prospective}
+    paths_path = representation_root / "candidate_paths.json"
+    edges_path = representation_root / "derived_candidate_edges.json"
+    predictions_path = representation_root / "prospective_predictions.json"
+    _write_immutable_json(paths_path, candidate_paths_bundle)
+    _write_immutable_json(edges_path, derived_edges_bundle)
+    _write_immutable_json(predictions_path, prospective_bundle)
+    for artifact, marker in (
+        (paths_path, "CANDIDATE_PATHS_FROZEN.sha256"),
+        (predictions_path, "PROSPECTIVE_PREDICTIONS_FROZEN.sha256"),
+    ):
+        _write_immutable(representation_root / marker, _sha256_path(artifact) + "\n")
+    validation_bundle.update(
+        {
+            "indicators_frozen_sha256": indicator_bundle_hash,
+            "candidate_paths_sha256": _sha256_path(paths_path),
+            "derived_candidate_edges_sha256": _sha256_path(edges_path),
+            "prospective_predictions_sha256": _sha256_path(predictions_path),
+            "all_semantics_frozen_before_baseline": True,
+        }
+    )
+    _write_path_replication(representation_root, path_generations)
+    _write_immutable_json(
+        representation_root / "representation_validation.json", validation_bundle
+    )
+    return validation_bundle
 
 
 def run_semantic_stage(
@@ -749,162 +1056,120 @@ def run_semantic_stage(
     prompt_template_path: Path,
     workers: int,
     progress_callback: Callable[[str, int, int], None] | None = None,
-    completion_provider: Callable[[str, int], Callable[[str, str], LLMResponse]] | None = None,
+    completion_provider: Callable[..., Callable[[str, str], LLMResponse]] | None = None,
 ) -> dict[str, Any]:
-    llm_config = load_llm_config(
-        llm_config_path, require_key=completion_provider is None
-    )
-    prompt_template = prompt_template_path.read_text(encoding="utf-8")
-    output_root = run_root / "llm"
-    output_root.mkdir(parents=True, exist_ok=True)
-    selection_generation_count = int(
-        experiment_config.get("semantic_replication", {}).get(
-            "selection_generations",
-            experiment_config["representation"]["independent_generations"],
-        )
-    )
-    replication_generation_count = int(
-        experiment_config.get("semantic_replication", {}).get(
-            "replication_only_generations", 0
-        )
-    )
-    if selection_generation_count != int(
-        experiment_config["representation"]["independent_generations"]
-    ):
-        raise ValueError(
-            "semantic selection_generations must match representation independent_generations"
-        )
-    results: list[dict[str, Any]] = []
+    """Compatibility wrapper that executes both semantic phases in strict order."""
 
-    def run_generation_wave(indices: range, label: str) -> None:
-        jobs = [
-            (scenario, index)
-            for scenario in experiment_config["scenarios"]
-            for index in indices
-        ]
-        if not jobs:
-            return
-        completed = 0
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs)))) as pool:
-            futures = {
-                pool.submit(
-                    run_generation,
-                    scenario,
-                    index,
-                    experiment_config,
-                    llm_config,
-                    prompt_template,
-                    output_root,
-                    completion_provider(scenario, index) if completion_provider else None,
-                ): (scenario, index)
-                for scenario, index in jobs
-            }
-            for future in as_completed(futures):
-                results.append(future.result())
-                completed += 1
-                if progress_callback:
-                    progress_callback(label, completed, len(jobs))
-
-    run_generation_wave(
-        range(selection_generation_count), "Semantic selection generations"
-    )
-    run_generation_wave(
-        range(
-            selection_generation_count,
-            selection_generation_count + replication_generation_count,
-        ),
-        "Semantic replication generations",
-    )
-    representation_root = run_root / "representation"
-    representation_root.mkdir(parents=True, exist_ok=True)
-    validation_bundle: dict[str, Any] = {}
-    agreement_bundle: dict[str, Any] = {}
-    predictions_bundle: dict[str, Any] = {"schema_version": "1.0", "scenarios": {}}
-    for scenario in experiment_config["scenarios"]:
-        accepted_all = [
-            item
-            for item in results
-            if item["scenario"] == scenario and item["status"] == "accepted"
-        ]
-        accepted = [
-            item
-            for item in accepted_all
-            if int(item["generation"]) < selection_generation_count
-        ]
-        if not accepted:
-            raise RuntimeError(f"no valid formal semantic generation for {scenario}")
-        selected = min(accepted, key=_selection_key)
-        generation = selected["accepted_generation"]
-        representation = generation["representation"]
-        representation_path = representation_root / f"{scenario}_representation.json"
-        representation_path.write_text(
-            json.dumps(representation, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        predictions_bundle["scenarios"][scenario] = generation["prospective_predictions"]
-        validation_bundle[scenario] = {
-            "selected_generation": selected["generation"],
-            "selection_rule": experiment_config["representation"]["selection_rule"],
-            "selection_key": list(_selection_key(selected)),
-            "selection_reason": (
-                "selected only from generation indices below selection_generation_count, "
-                "without simulation statistics or evaluation outcomes; replication-only "
-                "generations were categorically ineligible"
-            ),
-            "representation_sha256": hashlib.sha256(representation_path.read_bytes()).hexdigest(),
-            "accepted_generation_count": len(accepted),
-            "selection_eligible_accepted_generation_count": len(accepted),
-            "replication_only_accepted_generation_count": len(accepted_all) - len(accepted),
-            "selection_generation_count": selection_generation_count,
-            "replication_only_generation_count": replication_generation_count,
-            "all_generations": [
-                {
-                    "generation": item["generation"],
-                    "generation_role": (
-                        "selection_eligible"
-                        if int(item["generation"]) < selection_generation_count
-                        else "replication_only"
-                    ),
-                    "selection_eligible": bool(
-                        int(item["generation"]) < selection_generation_count
-                    ),
-                    "status": item["status"],
-                    "repair_rounds": item["repair_rounds"],
-                    "validation": item["validation"],
-                }
-                for item in sorted(
-                    [entry for entry in results if entry["scenario"] == scenario],
-                    key=lambda entry: entry["generation"],
-                )
-            ],
-        }
-        agreement_bundle[scenario] = _agreement(accepted)
-    write_replication_agreement(
+    run_indicator_generation_stage(
+        experiment_config,
+        llm_config_path,
         run_root,
-        results,
-        list(experiment_config["scenarios"]),
-        selection_generation_count,
+        prompt_template_path,
+        workers,
+        progress_callback,
+        completion_provider,
     )
-    predictions_path = representation_root / "prospective_predictions.json"
-    predictions_path.write_text(
-        json.dumps(predictions_bundle, indent=2, ensure_ascii=False), encoding="utf-8"
+    freeze_indicator_stage(experiment_config, run_root)
+    return run_path_generation_stage(
+        experiment_config,
+        llm_config_path,
+        run_root,
+        prompt_template_path,
+        workers,
+        progress_callback,
+        completion_provider,
     )
-    validation_bundle["prospective_predictions_sha256"] = hashlib.sha256(
-        predictions_path.read_bytes()
-    ).hexdigest()
-    (representation_root / "representation_validation.json").write_text(
-        json.dumps(validation_bundle, indent=2, ensure_ascii=False), encoding="utf-8"
+
+
+def run_generation(
+    scenario: str,
+    generation_index: int,
+    experiment_config: dict[str, Any],
+    llm_config: dict[str, Any],
+    prompt_template: str,
+    output_root: Path,
+    completion: Callable[[str, str], LLMResponse] | None = None,
+) -> dict[str, Any]:
+    """Compatibility entry point for a single Phase A generation."""
+    spec = experiment_config["scenarios"][scenario]
+    rep = experiment_config["representation"]
+    system, user = build_indicator_prompt(scenario, spec, rep, prompt_template)
+    result = _run_generation_call(
+        root=output_root / "indicator" / scenario / f"generation_{generation_index:02d}",
+        model=IndicatorGeneration,
+        validator=lambda value: validate_indicator_generation(value, scenario, spec, rep),
+        system=system,
+        user=user,
+        maximum_repairs=int(rep["maximum_repair_rounds"]),
+        completion=completion,
+        llm_config=llm_config,
     )
-    (representation_root / "representation_agreement.json").write_text(
-        json.dumps(agreement_bundle, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    return validation_bundle
+    return {"scenario": scenario, "generation": generation_index, **result}
 
 
 def load_frozen_representations(run_root: Path) -> dict[str, dict[str, Any]]:
+    validation_path = run_root / "representation" / "representation_validation.json"
+    if not validation_path.is_file():
+        raise FileNotFoundError("semantic freeze validation is missing")
+    validation = json.loads(validation_path.read_text(encoding="utf-8"))
+    checks = {
+        "indicators_frozen.json": (
+            validation["indicators_frozen_sha256"], "INDICATORS_FROZEN.sha256"
+        ),
+        "candidate_paths.json": (
+            validation["candidate_paths_sha256"], "CANDIDATE_PATHS_FROZEN.sha256"
+        ),
+        "derived_candidate_edges.json": (
+            validation["derived_candidate_edges_sha256"], None
+        ),
+        "prospective_predictions.json": (
+            validation["prospective_predictions_sha256"],
+            "PROSPECTIVE_PREDICTIONS_FROZEN.sha256",
+        ),
+    }
+    for name, (expected, marker_name) in checks.items():
+        path = run_root / "representation" / name
+        if not path.is_file() or _sha256_path(path) != expected:
+            raise RuntimeError(f"frozen semantic artifact hash mismatch: {name}")
+        if marker_name is not None:
+            marker = run_root / "representation" / marker_name
+            if not marker.is_file() or marker.read_text(encoding="utf-8").strip() != expected:
+                raise RuntimeError(f"frozen semantic marker mismatch: {marker_name}")
+    root = run_root / "representation"
+    indicator_bundle = json.loads(
+        (root / "indicators_frozen.json").read_text(encoding="utf-8")
+    )["scenarios"]
+    path_bundle = json.loads(
+        (root / "candidate_paths.json").read_text(encoding="utf-8")
+    )["scenarios"]
+    edge_bundle = json.loads(
+        (root / "derived_candidate_edges.json").read_text(encoding="utf-8")
+    )["scenarios"]
+    if not set(indicator_bundle) == set(path_bundle) == set(edge_bundle):
+        raise RuntimeError("frozen semantic scenario sets do not match")
     result: dict[str, dict[str, Any]] = {}
-    for path in sorted((run_root / "representation").glob("*_representation.json")):
-        scenario = path.name.removesuffix("_representation.json")
-        result[scenario] = json.loads(path.read_text(encoding="utf-8"))
+    for scenario in sorted(indicator_bundle):
+        expected_edges = derive_candidate_edges(path_bundle[scenario])
+        if edge_bundle[scenario] != expected_edges:
+            raise RuntimeError(
+                f"derived candidate relations do not match frozen paths: {scenario}"
+            )
+        assembled = StructuredRepresentation.model_validate(
+            {
+                **indicator_bundle[scenario],
+                "candidate_paths": path_bundle[scenario],
+                "candidate_edges": expected_edges,
+            }
+        ).model_dump(mode="json", exclude_none=True)
+        scenario_path = root / f"{scenario}_representation.json"
+        if not scenario_path.is_file():
+            raise FileNotFoundError(f"frozen scenario representation is missing: {scenario}")
+        stored = StructuredRepresentation.model_validate_json(
+            scenario_path.read_text(encoding="utf-8")
+        ).model_dump(mode="json", exclude_none=True)
+        if stored != assembled:
+            raise RuntimeError(f"frozen scenario representation mismatch: {scenario}")
+        result[scenario] = assembled
     if not result:
         raise FileNotFoundError("no frozen representations were found")
     return result

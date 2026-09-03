@@ -9,7 +9,11 @@ import pytest
 
 from emergence_attribution.dsl import DSLValidationError, expression_fields
 from emergence_attribution.evaluation import GRAPH_METHODS
-from emergence_attribution.mock_semantic import mock_generation
+from emergence_attribution.mock_semantic import (
+    mock_generation,
+    mock_indicator_generation,
+    mock_path_generation,
+)
 from emergence_attribution.pipeline import STAGE_ORDER, load_experiment_config
 from emergence_attribution.predefined import predefined_representation
 from emergence_attribution.provenance import RunContractError, source_manifest
@@ -18,8 +22,13 @@ from emergence_attribution.raw_schemas import (
     hidden_reference_schema,
     public_raw_schema,
 )
-from emergence_attribution.schemas import SemanticGeneration
-from emergence_attribution.semantic import build_prompt, validate_generation
+from emergence_attribution.schemas import IndicatorGeneration, PathGeneration, SemanticGeneration
+from emergence_attribution.semantic import (
+    build_prompt,
+    sha256_json,
+    validate_generation,
+    validate_path_generation,
+)
 from emergence_attribution.simulation import (
     IndicatorCompilationTask,
     SimulationTask,
@@ -136,8 +145,8 @@ def test_simulation_phases_are_disjoint() -> None:
     intervention = build_simulation_tasks(config, Path("raw"), phase="intervention")
     assert {task.condition for task in baseline} == {"baseline"}
     assert "baseline" not in {task.condition for task in intervention}
-    assert len(baseline) == 4
-    assert len(intervention) == 28
+    assert len(baseline) == 12
+    assert len(intervention) == 84
 
 
 @pytest.mark.parametrize("scenario", ["schelling", "deffuant"])
@@ -181,7 +190,7 @@ def test_point_graph_has_nan_stability() -> None:
 
     blocks = prepare_target_blocks(
         [pd.DataFrame({"source": source, "target": target})],
-        [{"source": "source", "target": "target", "branch_id": "b", "expected_direction": "unknown"}],
+        [{"source": "source", "target": "target", "hypothesis_group_id": "macro_outcome_target", "expected_direction": "unknown"}],
         3,
     )
     graph = discover_point_graph_from_blocks(blocks, 0.10, 0.05)
@@ -191,10 +200,11 @@ def test_point_graph_has_nan_stability() -> None:
 
 def test_prospective_prediction_frozen_before_simulation() -> None:
     assert STAGE_ORDER[:5] == [
-        "semantic", "baseline_simulation", "temporal",
-        "intervention_simulation", "intervention",
+        "indicator_generation", "indicator_freeze", "path_generation",
+        "semantic_freeze", "baseline_simulation",
     ]
-    assert STAGE_ORDER.index("prospective") < STAGE_ORDER.index("robustness")
+    assert STAGE_ORDER.index("path_generation") < STAGE_ORDER.index("baseline_simulation")
+    assert STAGE_ORDER.index("prospective") < STAGE_ORDER.index("primary_freeze")
 
 
 def test_source_manifest_excludes_non_scientific_output_trees(tmp_path: Path) -> None:
@@ -254,51 +264,55 @@ def test_each_parameter_has_direct_micro_source() -> None:
 
 def test_prediction_source_matches_parameter() -> None:
     config = load_experiment_config(PROJECT_ROOT / "config" / "dev_experiment.json")
-    payload = mock_generation("schelling")
-    prediction = payload["prospective_predictions"][0]
+    indicator_payload = mock_indicator_generation("schelling")
+    indicator = IndicatorGeneration.model_validate(indicator_payload)
+    payload = mock_path_generation("schelling")
+    path = payload["candidate_paths"][0]
     wrong = next(
-        item["id"] for item in payload["representation"]["indicators"]
-        if item["scale"] == "micro" and item["id"] != prediction["source_indicator"]
+        item["id"] for item in indicator_payload["indicators"]
+        if item["scale"] == "micro"
+        and not any(
+            association["parameter"] == path["parameter"]
+            and association["relationship"] == "direct"
+            for association in item["parameter_associations"]
+        )
     )
-    prediction["source_indicator"] = wrong
-    prediction["expected_temporal_order"][0] = wrong
-    value = SemanticGeneration.model_validate(payload)
-    result = validate_generation(
-        value, "schelling", config["scenarios"]["schelling"], config["representation"]
+    path["micro_indicator"] = wrong
+    value = PathGeneration.model_validate(payload)
+    result = validate_path_generation(
+        value,
+        indicator,
+        sha256_json(indicator.model_dump(mode="json", exclude_none=True)),
+        config["scenarios"]["schelling"],
+        config["representation"],
     )
-    assert any("source must be a direct micro association" in error for error in result["errors"])
+    assert any("lacks direct parameter association" in error for error in result["errors"])
 
 
 def test_prediction_path_is_real_candidate_path() -> None:
-    config = load_experiment_config(PROJECT_ROOT / "config" / "dev_experiment.json")
-    payload = mock_generation("schelling")
-    prediction = payload["prospective_predictions"][0]
-    pair = tuple(prediction["validation_criteria"]["required_candidate_edges"][0].values())
-    payload["representation"]["candidate_edges"] = [
-        edge for edge in payload["representation"]["candidate_edges"]
-        if (edge["source"], edge["target"]) != pair
-    ]
-    value = SemanticGeneration.model_validate(payload)
-    result = validate_generation(
-        value, "schelling", config["scenarios"]["schelling"], config["representation"]
-    )
-    assert any("ordered path is absent" in error for error in result["errors"])
+    payload = mock_path_generation("schelling")
+    payload["prospective_predictions"][0]["candidate_path_id"] = "invented_path"
+    with pytest.raises(Exception, match="unknown path"):
+        PathGeneration.model_validate(payload)
 
 
-def test_all_generated_nodes_participate_in_graph() -> None:
+def test_all_candidate_paths_reference_frozen_nodes() -> None:
     representation = mock_generation("deffuant")["representation"]
+    frozen = {item["id"] for item in representation["indicators"]}
     touched = {
-        node for edge in representation["candidate_edges"]
-        for node in (edge["source"], edge["target"])
+        node for path in representation["candidate_paths"]
+        for node in (
+            path["micro_indicator"], path["meso_indicator"], path["macro_indicator"]
+        )
     }
-    assert touched == {item["id"] for item in representation["indicators"]}
+    assert touched <= frozen
 
 
-def test_candidate_edge_minimum_and_maximum() -> None:
+def test_candidate_path_minimum_and_maximum() -> None:
     config = load_experiment_config(PROJECT_ROOT / "config" / "experiment.json")
-    count = len(mock_generation("schelling")["representation"]["candidate_edges"])
-    assert config["representation"]["minimum_candidate_edges"] <= count
-    assert count <= config["representation"]["maximum_candidate_edges"]
+    count = len(mock_generation("schelling")["representation"]["candidate_paths"])
+    assert config["representation"]["minimum_candidate_paths"] <= count
+    assert count <= config["representation"]["maximum_candidate_paths"]
 
 
 def test_unrestricted_and_full_use_same_bootstrap_contract(
@@ -343,7 +357,7 @@ def test_single_trajectory_has_no_fake_stability() -> None:
     graph = discover_point_graph_from_blocks(
         prepare_target_blocks(
             [pd.DataFrame({"source": source, "target": target})],
-            [{"source": "source", "target": "target", "branch_id": "b", "expected_direction": "unknown"}], 5,
+            [{"source": "source", "target": "target", "hypothesis_group_id": "macro_outcome_target", "expected_direction": "unknown"}], 5,
         ), 0.10, 0.05,
     )
     assert graph and all(np.isnan(edge.support) for edge in graph)

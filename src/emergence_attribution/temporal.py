@@ -1,4 +1,4 @@
-"""Level-based lagged OLS, branch-local FDR, and trajectory bootstrap."""
+"""Lagged OLS with pre-frozen Macro-outcome FDR hypothesis groups."""
 
 from __future__ import annotations
 
@@ -30,14 +30,14 @@ class TemporalEdge:
     support: float
     lag_support: float
     lag_std: float
-    branch_id: str
+    hypothesis_group_id: str = "ungrouped"
 
 
 @dataclass(frozen=True)
 class TargetBlock:
     target: str
     sources: tuple[str, ...]
-    branches: dict[tuple[str, str], str]
+    hypothesis_groups: dict[tuple[str, str], tuple[str, ...]]
     y_blocks: tuple[np.ndarray, ...]
     x_blocks: tuple[np.ndarray, ...]
     terms: tuple[tuple[str, int, bool], ...]
@@ -64,16 +64,20 @@ def benjamini_hochberg(p_values: Sequence[float]) -> np.ndarray:
 
 
 def representation_candidates(representation: dict[str, Any]) -> list[dict[str, str]]:
-    lookup = {item["id"]: item for item in representation["indicators"]}
-    return [
-        {
-            "source": edge["source"],
-            "target": edge["target"],
-            "branch_id": lookup[edge["source"]]["branch_id"],
-            "expected_direction": edge["expected_direction"],
-        }
-        for edge in representation["candidate_edges"]
-    ]
+    candidates: list[dict[str, str]] = []
+    for edge in representation["candidate_edges"]:
+        groups = edge.get("hypothesis_group_ids")
+        if groups is None:
+            groups = [edge.get("hypothesis_group_id", "ungrouped")]
+        for group in groups:
+            candidates.append(
+                {
+                    "source": edge["source"], "target": edge["target"],
+                    "hypothesis_group_id": str(group),
+                    "expected_direction": edge["expected_direction"],
+                }
+            )
+    return candidates
 
 
 def unrestricted_candidates(representation: dict[str, Any]) -> list[dict[str, str]]:
@@ -82,7 +86,7 @@ def unrestricted_candidates(representation: dict[str, Any]) -> list[dict[str, st
         {
             "source": source,
             "target": target,
-            "branch_id": "unrestricted",
+            "hypothesis_group_id": "unrestricted",
             "expected_direction": "unknown",
         }
         for source in identifiers
@@ -97,10 +101,12 @@ def prepare_target_blocks(
     maximum_lag: int,
 ) -> tuple[TargetBlock, ...]:
     target_sources: dict[str, set[str]] = {}
-    branches: dict[tuple[str, str], str] = {}
+    groups: dict[tuple[str, str], set[str]] = {}
     for edge in candidates:
         target_sources.setdefault(edge["target"], set()).add(edge["source"])
-        branches[(edge["source"], edge["target"])] = edge["branch_id"]
+        groups.setdefault((edge["source"], edge["target"]), set()).add(
+            edge.get("hypothesis_group_id", "ungrouped")
+        )
     blocks: list[TargetBlock] = []
     for target, source_set in sorted(target_sources.items()):
         sources = tuple(sorted(source_set))
@@ -135,7 +141,9 @@ def prepare_target_blocks(
             TargetBlock(
                 target=target,
                 sources=sources,
-                branches=branches,
+                hypothesis_groups={
+                    key: tuple(sorted(values)) for key, values in groups.items()
+                },
                 y_blocks=tuple(y_blocks),
                 x_blocks=tuple(x_blocks),
                 terms=tuple(terms),
@@ -196,7 +204,7 @@ def discover_point_graph_from_blocks(
     fdr_alpha: float,
     sample_indices: Sequence[int] | None = None,
 ) -> list[TemporalEdge]:
-    provisional_by_branch: dict[
+    provisional_by_group: dict[
         str, list[tuple[str, str, int, float, float]]
     ] = {}
     for block in blocks:
@@ -217,18 +225,18 @@ def discover_point_graph_from_blocks(
         offset = len(self_indices)
         for local_index, term_index in enumerate(candidate_indices):
             source, lag, _ = block.terms[term_index]
-            branch = block.branches[(source, block.target)]
-            provisional_by_branch.setdefault(branch, []).append(
-                (
-                    source,
-                    block.target,
-                    lag,
-                    float(coefficients[offset + local_index]),
-                    float(p_values[offset + local_index]),
+            for group in block.hypothesis_groups[(source, block.target)]:
+                provisional_by_group.setdefault(group, []).append(
+                    (
+                        source,
+                        block.target,
+                        lag,
+                        float(coefficients[offset + local_index]),
+                        float(p_values[offset + local_index]),
+                    )
                 )
-            )
     result: list[TemporalEdge] = []
-    for branch, provisional in sorted(provisional_by_branch.items()):
+    for group, provisional in sorted(provisional_by_group.items()):
         q_values = benjamini_hochberg([item[4] for item in provisional])
         by_pair: dict[tuple[str, str], list[tuple[int, float, float, float]]] = {}
         for item, q_value in zip(provisional, q_values):
@@ -251,7 +259,7 @@ def discover_point_graph_from_blocks(
                         support=float("nan"),
                         lag_support=float("nan"),
                         lag_std=float("nan"),
-                        branch_id=branch,
+                        hypothesis_group_id=group,
                     )
                 )
     return result
@@ -320,18 +328,24 @@ def discover_bootstrap_graph(
                 if progress_callback:
                     progress_callback(len(bootstrap_graphs), bootstrap_repetitions)
     bootstrap_graphs.sort(key=lambda item: item[0])
-    pair_count: dict[tuple[str, str], int] = {}
-    lag_count: dict[tuple[str, str, int], int] = {}
-    lag_samples: dict[tuple[str, str], list[int]] = {}
+    pair_count: dict[tuple[str, str, str], int] = {}
+    lag_count: dict[tuple[str, str, str, int], int] = {}
+    lag_samples: dict[tuple[str, str, str], list[int]] = {}
     edge_sets: list[dict[str, Any]] = []
     for replicate, graph in bootstrap_graphs:
-        pairs = {(edge.source, edge.target) for edge in graph}
+        pairs = {
+            (edge.source, edge.target, edge.hypothesis_group_id) for edge in graph
+        }
         for pair in pairs:
             pair_count[pair] = pair_count.get(pair, 0) + 1
         for edge in graph:
-            key = (edge.source, edge.target, edge.lag)
+            key = (
+                edge.source, edge.target, edge.hypothesis_group_id, edge.lag
+            )
             lag_count[key] = lag_count.get(key, 0) + 1
-            lag_samples.setdefault((edge.source, edge.target), []).append(edge.lag)
+            lag_samples.setdefault(
+                (edge.source, edge.target, edge.hypothesis_group_id), []
+            ).append(edge.lag)
         edge_sets.append(
             {
                 "replicate": replicate,
@@ -348,7 +362,7 @@ def discover_bootstrap_graph(
         )
     retained: list[TemporalEdge] = []
     for edge in point:
-        pair = (edge.source, edge.target)
+        pair = (edge.source, edge.target, edge.hypothesis_group_id)
         support = pair_count.get(pair, 0) / bootstrap_repetitions
         if support < support_threshold:
             continue
@@ -357,7 +371,12 @@ def discover_bootstrap_graph(
             replace(
                 edge,
                 support=float(support),
-                lag_support=lag_count.get((edge.source, edge.target, edge.lag), 0)
+                lag_support=lag_count.get(
+                    (
+                        edge.source, edge.target, edge.hypothesis_group_id,
+                        edge.lag,
+                    ), 0
+                )
                 / bootstrap_repetitions,
                 lag_std=float(np.std(lags, ddof=1)) if len(lags) > 1 else 0.0,
             )
@@ -382,10 +401,12 @@ def discover_vote_graph(
     for frame in trajectory_frames:
         blocks = prepare_target_blocks([frame], candidates, maximum_lag)
         individual.append(discover_point_graph_from_blocks(blocks, parent_alpha, fdr_alpha))
-    grouped: dict[tuple[str, str], list[TemporalEdge]] = {}
+    grouped: dict[tuple[str, str, str], list[TemporalEdge]] = {}
     for graph in individual:
         for edge in graph:
-            grouped.setdefault((edge.source, edge.target), []).append(edge)
+            grouped.setdefault(
+                (edge.source, edge.target, edge.hypothesis_group_id), []
+            ).append(edge)
     result: list[TemporalEdge] = []
     for pair, edges in sorted(grouped.items()):
         support = len(edges) / len(individual)
@@ -414,7 +435,6 @@ def discover_vote_graph(
 
 
 def semantic_graph(representation: dict[str, Any]) -> list[TemporalEdge]:
-    lookup = {item["id"]: item for item in representation["indicators"]}
     direction_value = {"increase": 1.0, "decrease": -1.0, "mixed": 0.0, "unknown": 0.0}
     return [
         TemporalEdge(
@@ -428,9 +448,10 @@ def semantic_graph(representation: dict[str, Any]) -> list[TemporalEdge]:
             support=float("nan"),
             lag_support=float("nan"),
             lag_std=float("nan"),
-            branch_id=lookup[edge["source"]]["branch_id"],
+            hypothesis_group_id=group,
         )
         for edge in representation["candidate_edges"]
+        for group in edge["hypothesis_group_ids"]
     ]
 
 

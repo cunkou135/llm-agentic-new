@@ -476,9 +476,6 @@ def upstream_manipulation_routes(
     """
 
     scales = {item["id"]: item["scale"] for item in representation["indicators"]}
-    branches = {
-        item["id"]: item["branch_id"] for item in representation["indicators"]
-    }
     direct = direct_parameter_sources(representation)
     root_parameters: dict[str, list[str]] = {}
     for parameter, roots in direct.items():
@@ -489,18 +486,20 @@ def upstream_manipulation_routes(
         roots = [edge_source]
         scope = "direct_root"
     elif (source_scale, target_scale) == ("meso", "macro"):
-        candidate_pairs = {
-            (edge["source"], edge["target"])
-            for edge in representation.get("candidate_edges", [])
-        }
-        retained_pairs = {(edge.source, edge.target) for edge in graph}
+        paths = representation.get("candidate_paths", [])
         roots = sorted(
-            source
-            for source, target in candidate_pairs | retained_pairs
-            if target == edge_source
-            and scales.get(source) == "micro"
-            and branches.get(source) == branches.get(edge_source)
+            str(path["micro_indicator"])
+            for path in paths
+            if str(path["meso_indicator"]) == edge_source
+            and str(path["macro_indicator"]) == edge_target
         )
+        if not paths:
+            roots = sorted(
+                str(edge["source"])
+                for edge in representation.get("candidate_edges", [])
+                if str(edge["target"]) == edge_source
+                and scales.get(str(edge["source"])) == "micro"
+            )
         scope = "upstream_mediated"
     else:
         return []
@@ -685,25 +684,79 @@ def classify_edge_interventions(
 def graph_paths(
     graph: Sequence[TemporalEdge], representation: dict[str, Any]
 ) -> list[tuple[str, str, str]]:
-    scale = {item["id"]: item["scale"] for item in representation["indicators"]}
-    first = [
-        edge
-        for edge in graph
-        if scale.get(edge.source) == "micro" and scale.get(edge.target) == "meso"
-    ]
-    second = [
-        edge
-        for edge in graph
-        if scale.get(edge.source) == "meso" and scale.get(edge.target) == "macro"
-    ]
+    retained = {
+        (edge.source, edge.target, edge.hypothesis_group_id) for edge in graph
+    }
     return sorted(
-        {
-            (left.source, left.target, right.target)
-            for left in first
-            for right in second
-            if left.target == right.source
-        }
+        (
+            str(path["micro_indicator"]),
+            str(path["meso_indicator"]),
+            str(path["macro_indicator"]),
+        )
+        for path in representation.get("candidate_paths", [])
+        if (
+            str(path["micro_indicator"]),
+            str(path["meso_indicator"]),
+            f"macro_outcome_{path['macro_indicator']}",
+        ) in retained
+        and (
+            str(path["meso_indicator"]),
+            str(path["macro_indicator"]),
+            f"macro_outcome_{path['macro_indicator']}",
+        ) in retained
     )
+
+
+PATH_TEMPORAL_QUALIFICATION_COLUMNS = [
+    "scenario", "path_id", "parameter", "hypothesis_group_id",
+    "micro", "meso", "macro",
+    "micro_meso_retained", "micro_meso_lag", "micro_meso_beta",
+    "micro_meso_q", "micro_meso_support",
+    "meso_macro_retained", "meso_macro_lag", "meso_macro_beta",
+    "meso_macro_q", "meso_macro_support", "path_temporally_qualified",
+]
+
+
+def qualify_candidate_paths(
+    scenario: str,
+    graph: Sequence[TemporalEdge],
+    representation: dict[str, Any],
+) -> pd.DataFrame:
+    """Map retained group-specific edges back to pre-frozen CandidatePath IDs."""
+
+    retained = {
+        (edge.source, edge.target, edge.hypothesis_group_id): edge for edge in graph
+    }
+    rows: list[dict[str, Any]] = []
+    for path in representation.get("candidate_paths", []):
+        micro = str(path["micro_indicator"])
+        meso = str(path["meso_indicator"])
+        macro = str(path["macro_indicator"])
+        group = f"macro_outcome_{macro}"
+        first = retained.get((micro, meso, group))
+        second = retained.get((meso, macro, group))
+        row = {
+            "scenario": scenario,
+            "path_id": str(path["path_id"]),
+            "parameter": str(path["parameter"]),
+            "hypothesis_group_id": group,
+            "micro": micro,
+            "meso": meso,
+            "macro": macro,
+            "micro_meso_retained": first is not None,
+            "micro_meso_lag": first.lag if first else np.nan,
+            "micro_meso_beta": first.beta if first else np.nan,
+            "micro_meso_q": first.q_value if first else np.nan,
+            "micro_meso_support": first.support if first else np.nan,
+            "meso_macro_retained": second is not None,
+            "meso_macro_lag": second.lag if second else np.nan,
+            "meso_macro_beta": second.beta if second else np.nan,
+            "meso_macro_q": second.q_value if second else np.nan,
+            "meso_macro_support": second.support if second else np.nan,
+            "path_temporally_qualified": first is not None and second is not None,
+        }
+        rows.append(row)
+    return pd.DataFrame(rows, columns=PATH_TEMPORAL_QUALIFICATION_COLUMNS)
 
 
 def path_timing_summary(
@@ -712,63 +765,55 @@ def path_timing_summary(
     effects: pd.DataFrame,
     representation: dict[str, Any],
 ) -> pd.DataFrame:
-    edge_lag = {(edge.source, edge.target): edge.lag for edge in graph}
-    direct = direct_parameter_sources(representation)
-    source_parameters: dict[str, list[str]] = {}
-    for parameter, nodes in direct.items():
-        for node in nodes:
-            source_parameters.setdefault(node, []).append(parameter)
+    qualified = qualify_candidate_paths(scenario, graph, representation)
+    paths = {
+        str(path["path_id"]): path for path in representation.get("candidate_paths", [])
+    }
     rows: list[dict[str, Any]] = []
-    for source, meso, macro in graph_paths(graph, representation):
-        for parameter in sorted(source_parameters.get(source, [])):
-            for direction in ("minus", "plus"):
-                subset = effects[
-                    (effects["scenario"] == scenario)
-                    & (effects["parameter"] == parameter)
-                    & (effects["direction"] == direction)
-                    & (effects["node_id"].isin([source, meso, macro]))
-                ]
-                if len(subset) != 3:
-                    continue
-                lookup = {row.node_id: row for row in subset.itertuples()}
-                path_id = f"{parameter}:{direction}:{source}>{meso}>{macro}"
-                for scale, node, parent in (
-                    ("micro", source, None),
-                    ("meso", meso, source),
-                    ("macro", macro, meso),
-                ):
-                    item = lookup[node]
-                    parent_onset = lookup[parent].onset_time if parent else np.nan
-                    response_delay = (
-                        item.onset_time - parent_onset
-                        if parent and item.onset_time >= 0 and parent_onset >= 0
-                        else np.nan
-                    )
-                    observational_lag = edge_lag.get((parent, node), np.nan) if parent else np.nan
-                    rows.append(
-                        {
-                            "scenario": scenario,
-                            "path_id": path_id,
-                            "parameter": parameter,
-                            "direction": direction,
-                            "source": source,
-                            "meso": meso,
-                            "macro": macro,
-                            "node_id": node,
-                            "scale": scale,
-                            "onset_time": item.onset_time,
-                            "onset_ci_low": item.onset_ci_low,
-                            "onset_ci_high": item.onset_ci_high,
-                            "observational_lag": observational_lag,
-                            "response_delay": response_delay,
-                            "lag_difference": response_delay - observational_lag
-                            if np.isfinite(response_delay) and np.isfinite(observational_lag)
-                            else np.nan,
-                            "cumulative_effect": item.cumulative_effect_standardised,
-                            "cumulative_effect_raw": item.cumulative_effect_raw,
-                            "significant": item.significant,
-                        }
-                    )
+    for temporal in qualified.itertuples(index=False):
+        if not bool(temporal.path_temporally_qualified):
+            continue
+        path = paths[str(temporal.path_id)]
+        source, meso, macro = str(temporal.micro), str(temporal.meso), str(temporal.macro)
+        parameter = str(path["parameter"])
+        direction = str(path["intervention_direction"])
+        subset = effects[
+            (effects["scenario"] == scenario)
+            & (effects["parameter"] == parameter)
+            & (effects["direction"] == direction)
+            & (effects["node_id"].isin([source, meso, macro]))
+        ]
+        if len(subset) != 3:
+            continue
+        lookup = {row.node_id: row for row in subset.itertuples()}
+        lags = {meso: temporal.micro_meso_lag, macro: temporal.meso_macro_lag}
+        for scale, node, parent in (
+            ("micro", source, None), ("meso", meso, source), ("macro", macro, meso)
+        ):
+            item = lookup[node]
+            parent_onset = lookup[parent].onset_time if parent else np.nan
+            response_delay = (
+                item.onset_time - parent_onset
+                if parent and item.onset_time >= 0 and parent_onset >= 0 else np.nan
+            )
+            observational_lag = lags.get(node, np.nan)
+            rows.append(
+                {
+                    "scenario": scenario, "path_id": str(path["path_id"]),
+                    "parameter": parameter, "direction": direction,
+                    "source": source, "meso": meso, "macro": macro,
+                    "node_id": node, "scale": scale,
+                    "onset_time": item.onset_time, "onset_ci_low": item.onset_ci_low,
+                    "onset_ci_high": item.onset_ci_high,
+                    "observational_lag": observational_lag,
+                    "response_delay": response_delay,
+                    "lag_difference": response_delay - observational_lag
+                    if np.isfinite(response_delay) and np.isfinite(observational_lag) else np.nan,
+                    "cumulative_effect": item.cumulative_effect_standardised,
+                    "cumulative_effect_raw": item.cumulative_effect_raw,
+                    "significant": item.significant,
+                }
+            )
     # An empty path set is a valid scientific result.  Preserve the stable
     # schema so exporters and renderers can distinguish zero records from a
     # malformed headerless file.
@@ -833,32 +878,186 @@ def eligible_propagation_path_ids(
     return valid_ids
 
 
+PATH_INTERVENTION_CLASSIFICATION_COLUMNS = [
+    "scenario", "path_id", "parameter", "direction", "micro", "meso", "macro",
+    "path_temporally_qualified", "manipulation_success",
+    "micro_meso_class", "meso_macro_class", "direction_supported",
+    "onset_order_supported", "path_classification", "reason",
+]
+
+
+def classify_candidate_paths(
+    temporal_qualification: pd.DataFrame,
+    classifications: pd.DataFrame,
+    representations: dict[str, dict[str, Any]],
+) -> pd.DataFrame:
+    """Classify every frozen hypothesis without reconstructing or cherry-picking paths."""
+
+    rows: list[dict[str, Any]] = []
+    for scenario, representation in sorted(representations.items()):
+        paths = {
+            str(path["path_id"]): path
+            for path in representation.get("candidate_paths", [])
+        }
+        temporal_by_id = {
+            str(row.path_id): row
+            for row in temporal_qualification[
+                temporal_qualification["scenario"].astype(str) == scenario
+            ].itertuples(index=False)
+        }
+        for path_id, path in sorted(paths.items()):
+            micro = str(path["micro_indicator"])
+            meso = str(path["meso_indicator"])
+            macro = str(path["macro_indicator"])
+            parameter = str(path["parameter"])
+            direction = str(path["intervention_direction"])
+            temporal = temporal_by_id.get(path_id)
+            qualified = bool(
+                temporal is not None and temporal.path_temporally_qualified
+            )
+            subset = classifications[
+                (classifications["scenario"].astype(str) == scenario)
+                & (classifications["method"].astype(str) == "full_method")
+                & (classifications["parameter"].astype(str) == parameter)
+                & (classifications["direction"].astype(str) == direction)
+                & (classifications["root_source"].astype(str) == micro)
+            ]
+            evidence = aggregate_edge_intervention_evidence(subset)
+            edge_classes = {
+                (str(row.source), str(row.target)): str(row.edge_class)
+                for row in evidence.itertuples(index=False)
+            }
+            first_class = edge_classes.get((micro, meso), "inconclusive")
+            second_class = edge_classes.get((meso, macro), "inconclusive")
+            first_rows = subset[
+                (subset["source"].astype(str) == micro)
+                & (subset["target"].astype(str) == meso)
+            ]
+            second_rows = subset[
+                (subset["source"].astype(str) == meso)
+                & (subset["target"].astype(str) == macro)
+            ]
+            manipulation_success = bool(
+                len(first_rows) and first_rows["manipulation_success"].astype(bool).any()
+            )
+            first = first_rows.iloc[0] if len(first_rows) else None
+            second = second_rows.iloc[0] if len(second_rows) else None
+            effects = (
+                float(first["root_effect"]) if first is not None else np.nan,
+                float(first["target_effect"]) if first is not None else np.nan,
+                float(second["target_effect"]) if second is not None else np.nan,
+            )
+            expected_responses = (
+                str(path["expected_micro_response"]),
+                str(path["expected_meso_response"]),
+                str(path["expected_macro_response"]),
+            )
+            response_matches = [
+                np.isfinite(effect)
+                and int(np.sign(effect)) == (1 if expected == "increase" else -1)
+                for effect, expected in zip(effects, expected_responses)
+            ]
+            edge_direction_matches = []
+            for parent, child, expected in (
+                (effects[0], effects[1], str(path["micro_to_meso_expected_direction"])),
+                (effects[1], effects[2], str(path["meso_to_macro_expected_direction"])),
+            ):
+                edge_direction_matches.append(
+                    np.isfinite(parent)
+                    and np.isfinite(child)
+                    and int(np.sign(parent * child))
+                    == (1 if expected == "increase" else -1)
+                )
+            direction_supported = bool(all(response_matches + edge_direction_matches))
+            onsets = (
+                float(first["root_onset"]) if first is not None else np.nan,
+                float(first["target_onset"]) if first is not None else np.nan,
+                float(second["target_onset"]) if second is not None else np.nan,
+            )
+            onset_order_supported = bool(
+                all(np.isfinite(value) and value >= 0 for value in onsets)
+                and np.all(np.diff(np.asarray(onsets, dtype=float)) >= 0)
+            )
+            if not qualified:
+                classification = "inconclusive"
+                reason = "path_not_temporally_qualified"
+            elif not manipulation_success or first_class == "manipulation_failure":
+                classification = "manipulation_failure"
+                reason = "required_micro_manipulation_failed"
+            elif (
+                first_class == "directionally_contradicted"
+                or second_class == "directionally_contradicted"
+                or (all(np.isfinite(value) for value in effects) and not direction_supported)
+            ):
+                classification = "contradicted"
+                reason = "frozen_direction_contradicted"
+            elif (
+                first_class == "supported"
+                and second_class == "supported"
+                and direction_supported
+                and onset_order_supported
+            ):
+                classification = "supported"
+                reason = "all_frozen_path_requirements_supported"
+            else:
+                classification = "inconclusive"
+                reason = "insufficient_complete_path_evidence"
+            rows.append(
+                {
+                    "scenario": scenario, "path_id": path_id,
+                    "parameter": parameter, "direction": direction,
+                    "micro": micro, "meso": meso, "macro": macro,
+                    "path_temporally_qualified": qualified,
+                    "manipulation_success": manipulation_success,
+                    "micro_meso_class": first_class,
+                    "meso_macro_class": second_class,
+                    "direction_supported": direction_supported,
+                    "onset_order_supported": onset_order_supported,
+                    "path_classification": classification,
+                    "reason": reason,
+                }
+            )
+    return pd.DataFrame(rows, columns=PATH_INTERVENTION_CLASSIFICATION_COLUMNS)
+
+
 def select_representative_paths(
-    path_summary: pd.DataFrame,
-    classifications: pd.DataFrame | None = None,
+    path_classification: pd.DataFrame,
+    holdout_confirmation: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     selected: dict[str, Any] = {
-        "selection_rule": "closest_to_median_absolute_macro_cumulative_effect_among_complete_ordered_full_method_intervention_supported_paths",
+        "selection_rule": "supported_and_holdout_confirmed_then_lexical_path_id_else_primary_supported_then_lexical_path_id",
         "scenarios": {},
     }
-    valid_ids = eligible_propagation_path_ids(path_summary, classifications)
-    for scenario, scenario_frame in path_summary.groupby("scenario"):
-        macro = scenario_frame[
-            (scenario_frame["scale"] == "macro")
-            & (scenario_frame["path_id"].astype(str).isin(valid_ids))
+    for scenario, scenario_frame in path_classification.groupby("scenario"):
+        supported = scenario_frame[
+            scenario_frame["path_classification"].astype(str) == "supported"
         ].copy()
-        if macro.empty:
+        if supported.empty:
             selected["scenarios"][scenario] = {
                 "path_id": None,
-                "reason": "no complete ordered full-method intervention-supported path",
+                "reason": "no frozen candidate path has complete intervention support",
             }
             continue
-        macro["absolute_effect"] = macro["cumulative_effect"].abs()
-        median = float(macro["absolute_effect"].median())
-        row = macro.loc[(macro["absolute_effect"] - median).abs().idxmin()]
+        confirmed: set[str] = set()
+        if holdout_confirmation is not None and not holdout_confirmation.empty:
+            column = (
+                "holdout_confirmed"
+                if "holdout_confirmed" in holdout_confirmation.columns
+                else "confirmed"
+            )
+            if column in holdout_confirmation.columns:
+                confirmed = set(
+                    holdout_confirmation[
+                        (holdout_confirmation["scenario"].astype(str) == str(scenario))
+                        & (holdout_confirmation[column].astype(bool))
+                    ]["path_id"].astype(str)
+                )
+        preferred = supported[supported["path_id"].astype(str).isin(confirmed)]
+        pool = preferred if not preferred.empty else supported
+        path_id = sorted(pool["path_id"].astype(str))[0]
         selected["scenarios"][scenario] = {
-            "path_id": str(row["path_id"]),
-            "median_absolute_effect": median,
+            "path_id": path_id,
+            "evidence_scope": "holdout_confirmed" if path_id in confirmed else "primary_only",
         }
     return selected
 
@@ -882,6 +1081,7 @@ def run_intervention_stage(
     graphs = load_graph_records(run_root / "analysis" / "main_graphs.jsonl")
     classifications = []
     timings = []
+    qualifications = []
     graph_methods = (
         "unrestricted_temporal_search",
         "single_trajectory",
@@ -908,11 +1108,21 @@ def run_intervention_stage(
             classified.insert(1, "method", method)
             classifications.append(classified)
         graph = graphs[(scenario, "full_method")]
+        qualifications.append(
+            qualify_candidate_paths(scenario, graph, representation)
+        )
         timings.append(
             path_timing_summary(scenario, graph, effects, representation)
         )
     classification_frame = pd.concat(classifications, ignore_index=True)
     timing_frame = pd.concat(timings, ignore_index=True) if timings else pd.DataFrame()
+    qualification_frame = (
+        pd.concat(qualifications, ignore_index=True)
+        if qualifications else pd.DataFrame(columns=PATH_TEMPORAL_QUALIFICATION_COLUMNS)
+    )
+    path_classification = classify_candidate_paths(
+        qualification_frame, classification_frame, representations
+    )
     effects.insert(0, "evaluation_track", "primary_discovery")
     curves.insert(0, "evaluation_track", "primary_discovery")
     classification_frame.insert(0, "evaluation_track", "primary_discovery")
@@ -926,13 +1136,14 @@ def run_intervention_stage(
     )
     edge_evidence = aggregate_edge_intervention_evidence(classification_frame)
     edge_evidence.to_csv(analysis_root / "edge_intervention_classifications.csv", index=False)
+    qualification_frame.to_csv(
+        analysis_root / "path_temporal_qualification.csv", index=False
+    )
+    path_classification.to_csv(
+        analysis_root / "path_intervention_classification.csv", index=False
+    )
     timing_frame.to_csv(analysis_root / "path_timing_summary.csv", index=False)
-    selection = select_representative_paths(
-        timing_frame, classification_frame
-    ) if not timing_frame.empty else {
-        "selection_rule": "no_path_available",
-        "scenarios": {},
-    }
+    selection = select_representative_paths(path_classification)
     (analysis_root / "representative_path_selection.json").write_text(
         json.dumps(selection, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -941,4 +1152,5 @@ def run_intervention_stage(
         "curve_rows": len(curves),
         "classification_rows": len(classification_frame),
         "path_rows": len(timing_frame),
+        "path_classification_rows": len(path_classification),
     }

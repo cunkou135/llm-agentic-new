@@ -24,8 +24,7 @@ PAIRWISE_COLUMNS = [
     "computation_signature_jaccard",
     "scale_assignment_jaccard",
     "source_family_jaccard",
-    "semantic_edge_jaccard",
-    "branch_structure_jaccard",
+    "indicator_structure_jaccard",
     "direct_parameter_source_jaccard",
     "macro_concept_jaccard",
 ]
@@ -52,7 +51,7 @@ def _families(scenario: str, source_fields: list[str]) -> tuple[str, ...]:
 
 
 def _generation_features(scenario: str, payload: dict[str, Any]) -> dict[str, set[Any]]:
-    representation = payload["accepted_generation"]["representation"]
+    representation = payload["accepted_generation"]
     indicators = representation["indicators"]
     by_id = {str(item["id"]): item for item in indicators}
     signatures = {
@@ -63,30 +62,10 @@ def _generation_features(scenario: str, payload: dict[str, Any]) -> dict[str, se
         node_id: _families(scenario, list(item.get("source_fields", [])))
         for node_id, item in by_id.items()
     }
-    branches: dict[str, list[str]] = {}
-    for node_id, item in by_id.items():
-        branches.setdefault(str(item["branch_id"]), []).append(node_id)
-    branch_structures: set[str] = set()
-    for branch_nodes in branches.values():
-        node_features = sorted(
-            (
-                str(by_id[node_id]["scale"]),
-                families[node_id],
-                signatures[node_id],
-            )
-            for node_id in branch_nodes
-        )
-        branch_edges = sorted(
-            (
-                str(by_id[edge["source"]]["scale"]),
-                str(by_id[edge["target"]]["scale"]),
-                signatures[edge["source"]],
-                signatures[edge["target"]],
-            )
-            for edge in representation["candidate_edges"]
-            if edge["source"] in branch_nodes and edge["target"] in branch_nodes
-        )
-        branch_structures.add(_canonical({"nodes": node_features, "edges": branch_edges}))
+    indicator_structures = {
+        _canonical((str(item["scale"]), families[node_id], signatures[node_id]))
+        for node_id, item in by_id.items()
+    }
     direct_parameter_sources = {
         (
             str(association["parameter"]),
@@ -109,15 +88,7 @@ def _generation_features(scenario: str, payload: dict[str, Any]) -> dict[str, se
             for node_id in by_id
             for family in families[node_id]
         },
-        "semantic_edge": {
-            (
-                signatures[str(edge["source"])],
-                signatures[str(edge["target"])],
-                str(edge.get("expected_direction", "unknown")),
-            )
-            for edge in representation["candidate_edges"]
-        },
-        "branch_structure": branch_structures,
+        "indicator_structure": indicator_structures,
         "direct_parameter_source": direct_parameter_sources,
         "macro_concept": {
             (signatures[node_id], families[node_id])
@@ -186,8 +157,7 @@ def write_replication_agreement(
                 ("computation_signature", "computation_signature_jaccard"),
                 ("scale_assignment", "scale_assignment_jaccard"),
                 ("source_family", "source_family_jaccard"),
-                ("semantic_edge", "semantic_edge_jaccard"),
-                ("branch_structure", "branch_structure_jaccard"),
+                ("indicator_structure", "indicator_structure_jaccard"),
                 ("direct_parameter_source", "direct_parameter_source_jaccard"),
                 ("macro_concept", "macro_concept_jaccard"),
             ):

@@ -11,7 +11,10 @@ import pandas as pd
 
 from .reference_truth import reference_processes, reference_relations
 from .interventions import aggregate_edge_intervention_evidence
-from .temporal import TemporalEdge, load_graph_records, unrestricted_candidates
+from .temporal import (
+    TemporalEdge, load_graph_records, representation_candidates,
+    unrestricted_candidates,
+)
 
 
 GRAPH_METHODS = (
@@ -29,7 +32,7 @@ def candidate_count_for_method(
 
     if method == "unrestricted_temporal_search":
         return len(unrestricted_candidates(representation))
-    return len(representation["candidate_edges"])
+    return len(representation_candidates(representation))
 
 
 def temporal_qualification_rate(retained_count: int, candidate_count: int) -> float:
@@ -184,9 +187,9 @@ def evaluate_full_discovery(
                 "stability": float(np.mean(supports)) if supports else float("nan"),
                 "lag_support": float(np.mean(lag_supports)) if lag_supports else float("nan"),
                 "lag_std": float(np.mean(lag_stds)) if lag_stds else float("nan"),
-                "representation_agreement": agreements[scenario].get(
-                    "computation_signature_jaccard"
-                ),
+                "representation_agreement": agreements.get("scenarios", agreements)
+                .get(scenario, {})
+                .get("computation_agreement"),
                 "runtime_seconds": runtime.get((scenario, method), float("nan")),
                 "edge_f1": float("nan"),
                 "shd": float("nan"),

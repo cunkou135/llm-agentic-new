@@ -58,7 +58,9 @@ def main() -> int:
     config_path = args.config.resolve()
     llm_config_path = args.llm_config.resolve()
     config = load_experiment_config(config_path)
-    requires_key = "all" in stages or "semantic" in stages
+    requires_key = "all" in stages or any(
+        stage in {"indicator_generation", "path_generation"} for stage in stages
+    )
     llm_config = load_llm_config(llm_config_path, require_key=requires_key)
     manager = RunManager.initialise(
         PROJECT_ROOT,

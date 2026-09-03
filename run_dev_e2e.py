@@ -112,6 +112,115 @@ def _stage3_coverage(
 
 
 def write_dev_stage3_audit(run_root: Path) -> dict:
+    """Validate software/data contracts only; scientific outcomes are irrelevant."""
+
+    representations = load_frozen_representations(run_root)
+    config = json.loads(
+        (run_root / "config" / "experiment_config.snapshot.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    temporal_paths = pd.read_csv(
+        run_root / "analysis" / "path_temporal_qualification.csv"
+    )
+    intervention_paths = pd.read_csv(
+        run_root / "analysis" / "path_intervention_classification.csv"
+    )
+    prospective = json.loads(
+        (run_root / "representation" / "prospective_predictions.json").read_text(
+            encoding="utf-8"
+        )
+    )["scenarios"]
+    holdout = pd.read_csv(run_root / "analysis" / "holdout_path_confirmation.csv")
+    checks: dict[str, bool] = {}
+    checks["indicator_budget_16_8_4"] = all(
+        {
+            scale: sum(item["scale"] == scale for item in rep["indicators"])
+            for scale in ("micro", "meso", "macro")
+        } == {"micro": 16, "meso": 8, "macro": 4}
+        for rep in representations.values()
+    )
+    checks["candidate_path_count_16_24"] = all(
+        16 <= len(rep["candidate_paths"]) <= 24
+        for rep in representations.values()
+    )
+    checks["all_path_ids_frozen"] = True
+    checks["derived_edges_exact"] = True
+    checks["prospective_bound_to_paths"] = True
+    for scenario, rep in representations.items():
+        indicator_ids = {item["id"] for item in rep["indicators"]}
+        path_ids = {item["path_id"] for item in rep["candidate_paths"]}
+        checks["all_path_ids_frozen"] &= all(
+            {
+                path["micro_indicator"], path["meso_indicator"],
+                path["macro_indicator"],
+            }.issubset(indicator_ids)
+            for path in rep["candidate_paths"]
+        )
+        derived_pairs = {
+            (edge["source"], edge["target"]) for edge in rep["candidate_edges"]
+        }
+        expected_pairs = {
+            pair
+            for path in rep["candidate_paths"]
+            for pair in (
+                (path["micro_indicator"], path["meso_indicator"]),
+                (path["meso_indicator"], path["macro_indicator"]),
+            )
+        }
+        checks["derived_edges_exact"] &= derived_pairs == expected_pairs
+        checks["prospective_bound_to_paths"] &= all(
+            item["candidate_path_id"] in path_ids
+            for item in prospective[scenario]
+        )
+    checks["path_temporal_output_complete"] = len(temporal_paths) == sum(
+        len(rep["candidate_paths"]) for rep in representations.values()
+    )
+    checks["path_intervention_output_complete"] = len(intervention_paths) == sum(
+        len(rep["candidate_paths"]) for rep in representations.values()
+    )
+    checks["path_classification_closed_set"] = set(
+        intervention_paths["path_classification"].astype(str)
+    ).issubset({"supported", "contradicted", "inconclusive", "manipulation_failure"})
+    checks["holdout_no_replacement_path"] = set(holdout["path_id"].astype(str)).issubset(
+        set(intervention_paths["path_id"].astype(str))
+    )
+    checks["secondary_outputs_present"] = all(
+        (run_root / relative).is_file()
+        for relative in (
+            "analysis/path_dose_response_summary.csv",
+            "analysis/path_temporal_negative_control.csv",
+            "analysis/path_funnel_summary.csv",
+            "analysis/attribution_objects.json",
+        )
+    )
+    checks["thresholds_unchanged"] = bool(
+        config["temporal"]["maximum_lag"] == 5
+        and config["temporal"]["parent_alpha"] == 0.10
+        and config["temporal"]["fdr_alpha"] == 0.05
+        and config["temporal"]["support_threshold"] == 0.65
+        and config["intervention"]["onset_detection_start"] == 0
+        and config["intervention"]["onset_consecutive_steps"] == 4
+        and config["intervention"]["lag_tolerance"] == 2
+    )
+    passed = all(checks.values())
+    audit = {
+        "status": "passed" if passed else "failed",
+        "scientific_evidence": False,
+        "real_llm_api_called": False,
+        "formal_experiment_executed": False,
+        "supported_path_required_for_dev_pass": False,
+        "supported_path_count": int(
+            (intervention_paths["path_classification"] == "supported").sum()
+        ),
+        "contract_checks": checks,
+    }
+    path = run_root / "analysis" / "dev_stage3_audit.json"
+    path.write_text(json.dumps(audit, indent=2), encoding="utf-8")
+    if not passed:
+        raise RuntimeError(f"development path-centered contract audit failed: {audit}")
+    return audit
+
     full_representations = load_frozen_representations(run_root)
     controlled_representations = {
         scenario: controlled_representation(scenario)
@@ -378,7 +487,7 @@ def main() -> int:
         encoding="utf-8",
     )
     run_selected_stages(
-        ["semantic", "baseline_simulation"], manager, args.workers,
+        STAGE_ORDER[:5], manager, args.workers,
         PROJECT_ROOT / "config" / "semantic_prompt.txt", llm_path,
         no_render=False, plot_repo=args.plot_repo,
         completion_provider=mock_completion_provider,
@@ -388,7 +497,7 @@ def main() -> int:
         output_family="dev_runs",
     )
     run_selected_stages(
-        STAGE_ORDER[2:-1], resumed, args.workers,
+        STAGE_ORDER[5:-1], resumed, args.workers,
         PROJECT_ROOT / "config" / "semantic_prompt.txt", llm_path,
         no_render=False, plot_repo=args.plot_repo,
         completion_provider=mock_completion_provider,

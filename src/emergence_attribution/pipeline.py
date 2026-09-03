@@ -16,7 +16,12 @@ from .controlled import (
 )
 from .evaluation import evaluate_main_graphs, update_intervention_metrics
 from .exporting import create_visualization_bundle, generate_tables, integrate_evidence
-from .interventions import run_intervention_stage
+from .interventions import (
+    classify_candidate_paths,
+    qualify_candidate_paths,
+    run_intervention_stage,
+    select_representative_paths,
+)
 from .llm_client import LLMResponse
 from .progress import ProgressReporter
 from .primary_freeze import freeze_primary_contract, verify_primary_contract
@@ -29,7 +34,12 @@ from .prospective import validate_prospective_predictions
 from .provenance import RunContractError, RunManager
 from .rendering import render_all_figures
 from .robustness import run_robustness_stage
-from .semantic import load_frozen_representations, run_semantic_stage
+from .semantic import (
+    freeze_indicator_stage,
+    load_frozen_representations,
+    run_indicator_generation_stage,
+    run_path_generation_stage,
+)
 from .simulation import (
     HOLDOUT_PARTITION,
     compile_indicator_dataset,
@@ -39,16 +49,22 @@ from .simulation import (
     run_intervention_simulation_stage,
     verify_simulation_manifest,
 )
-from .temporal import run_temporal_stage
+from .temporal import load_graph_records, run_temporal_stage
 
 
 STAGE_ORDER = [
-    "semantic",
+    "indicator_generation",
+    "indicator_freeze",
+    "path_generation",
+    "semantic_freeze",
     "baseline_simulation",
     "temporal",
+    "path_temporal_qualification",
     "intervention_simulation",
     "intervention",
+    "path_intervention_classification",
     "prospective",
+    "primary_freeze",
     "dose_response",
     "holdout_simulation",
     "holdout_confirmation",
@@ -66,19 +82,21 @@ def load_experiment_config(path: Path) -> dict[str, Any]:
     required = {
         "master_seed", "random_seeds", "representation", "temporal",
         "intervention", "robustness", "render", "scenarios",
-        "confirmation_seeds", "dose_response", "semantic_replication",
+        "confirmation_seeds", "dose_response", "semantic_replication", "path_replication",
         "temporal_negative_control",
     }
     missing = sorted(required - set(config))
     if missing:
         raise ValueError(f"experiment configuration fields are missing: {missing}")
     representation = config["representation"]
-    if int(representation["minimum_candidate_edges"]) < 28:
-        raise ValueError("minimum candidate edge count must be at least 28")
-    if int(representation["maximum_candidate_edges"]) < int(
-        representation["minimum_candidate_edges"]
+    if int(representation["minimum_candidate_paths"]) != 16:
+        raise ValueError("minimum candidate path count must equal 16")
+    if int(representation["maximum_candidate_paths"]) != 24:
+        raise ValueError("maximum candidate path count must equal 24")
+    if int(representation["maximum_candidate_paths"]) < int(
+        representation["minimum_candidate_paths"]
     ):
-        raise ValueError("maximum candidate edge count is below the minimum")
+        raise ValueError("maximum candidate path count is below the minimum")
     if bool(config.get("formal_run", True)):
         intervention = config["intervention"]
         frozen_intervention = {
@@ -107,9 +125,9 @@ def load_experiment_config(path: Path) -> dict[str, Any]:
         frozen_representation = {
             "independent_generations": 3,
             "maximum_repair_rounds": 3,
-            "required_branch_count": 4,
-            "minimum_candidate_edges": 28,
-            "maximum_candidate_edges": 48,
+            "minimum_candidate_paths": 16,
+            "maximum_candidate_paths": 24,
+            "prospective_prediction_count": 6,
         }
         for key, expected in frozen_representation.items():
             if representation.get(key) != expected:
@@ -122,10 +140,10 @@ def load_experiment_config(path: Path) -> dict[str, Any]:
             )
         if len(config["random_seeds"]) != 24:
             raise ValueError("formal runs require exactly 24 random seeds")
-        if config["random_seeds"] != list(range(1101, 1125)):
-            raise ValueError("formal primary seeds must be exactly 1101 through 1124")
-        if config["confirmation_seeds"] != list(range(2101, 2113)):
-            raise ValueError("formal holdout seeds must be exactly 2101 through 2112")
+        if config["random_seeds"] != list(range(3101, 3125)):
+            raise ValueError("formal primary seeds must be exactly 3101 through 3124")
+        if config["confirmation_seeds"] != list(range(4101, 4113)):
+            raise ValueError("formal holdout seeds must be exactly 4101 through 4112")
         if set(config["random_seeds"]) & set(config["confirmation_seeds"]):
             raise ValueError("primary and holdout seed pools must be disjoint")
         if config["dose_response"].get("enabled") is not True:
@@ -141,6 +159,11 @@ def load_experiment_config(path: Path) -> dict[str, Any]:
             raise ValueError("formal semantic selection requires exactly three generations")
         if replication.get("replication_only_generations") != 3:
             raise ValueError("formal semantic replication requires exactly three held-out generations")
+        path_replication = config["path_replication"]
+        if path_replication.get("primary_generations") != 1:
+            raise ValueError("formal path protocol requires one primary generation")
+        if path_replication.get("replication_only_generations") != 2:
+            raise ValueError("formal path replication requires two replication-only generations")
         negative = config["temporal_negative_control"]
         if (
             negative.get("enabled") is not True
@@ -220,12 +243,18 @@ def run_stage(
         reporter.finish_stage(stage, skipped=True)
         return
     dependencies = {
-        "baseline_simulation": ["semantic"],
-        "temporal": ["semantic", "baseline_simulation"],
-        "intervention_simulation": ["temporal"],
+        "indicator_freeze": ["indicator_generation"],
+        "path_generation": ["indicator_freeze"],
+        "semantic_freeze": ["path_generation"],
+        "baseline_simulation": ["semantic_freeze"],
+        "temporal": ["semantic_freeze", "baseline_simulation"],
+        "path_temporal_qualification": ["temporal"],
+        "intervention_simulation": ["path_temporal_qualification"],
         "intervention": ["intervention_simulation"],
-        "prospective": ["intervention"],
-        "dose_response": ["prospective"],
+        "path_intervention_classification": ["intervention"],
+        "prospective": ["path_intervention_classification"],
+        "primary_freeze": ["prospective"],
+        "dose_response": ["primary_freeze"],
         "holdout_simulation": ["dose_response"],
         "holdout_confirmation": ["holdout_simulation"],
         "temporal_negative_control": ["holdout_confirmation"],
@@ -240,13 +269,39 @@ def run_stage(
     started = time.perf_counter()
     details: dict[str, Any]
     outputs: list[Path]
-    if stage == "semantic":
-        details = run_semantic_stage(
+    if stage == "indicator_generation":
+        details = run_indicator_generation_stage(
             config, llm_config_path, run_root, prompt_template_path, workers,
             lambda label, done, total: reporter.update(label, done, total),
             completion_provider,
         )
-        outputs = _files(run_root, ["llm/**/*", "representation/*"])
+        outputs = _files(run_root, [
+            "llm/indicator/**/*",
+            "representation/indicator_selection.json",
+            "representation/indicator_generation_validation.json",
+            "representation/indicator_replication_pairwise.csv",
+            "representation/representation_agreement.json",
+        ])
+    elif stage == "indicator_freeze":
+        details = freeze_indicator_stage(config, run_root)
+        outputs = _files(run_root, [
+            "representation/INDICATORS_FROZEN.sha256",
+            "representation/indicators_frozen.json",
+        ])
+    elif stage == "path_generation":
+        details = run_path_generation_stage(
+            config, llm_config_path, run_root, prompt_template_path, workers,
+            lambda label, done, total: reporter.update(label, done, total),
+            completion_provider,
+        )
+        outputs = _files(run_root, ["llm/path/**/*", "representation/*"])
+    elif stage == "semantic_freeze":
+        representations = load_frozen_representations(run_root)
+        details = {
+            "semantic_scenarios": len(representations),
+            "all_semantics_frozen_before_baseline": True,
+        }
+        outputs = _files(run_root, ["representation/*"])
     elif stage == "baseline_simulation":
         details = run_baseline_simulation_stage(config, run_root, workers, callback)
         outputs = _files(run_root, [
@@ -283,6 +338,25 @@ def run_stage(
             "analysis/bootstrap_summary.json",
             "analysis/method_runtime.csv", "analysis/controlled_recovery_runtime.csv",
         ])
+    elif stage == "path_temporal_qualification":
+        representations = load_frozen_representations(run_root)
+        graphs = load_graph_records(run_root / "analysis" / "main_graphs.jsonl")
+        frames = [
+            qualify_candidate_paths(
+                scenario, graphs[(scenario, "full_method")], representation
+            )
+            for scenario, representation in sorted(representations.items())
+        ]
+        qualification = pd.concat(frames, ignore_index=True)
+        output = run_root / "analysis" / "path_temporal_qualification.csv"
+        qualification.to_csv(output, index=False)
+        details = {
+            "candidate_paths": len(qualification),
+            "temporally_qualified_paths": int(
+                qualification["path_temporally_qualified"].astype(bool).sum()
+            ),
+        }
+        outputs = [output]
     elif stage == "intervention_simulation":
         details = run_intervention_simulation_stage(config, run_root, workers, callback)
         outputs = _files(run_root, [
@@ -322,16 +396,40 @@ def run_stage(
     elif stage == "prospective":
         representations = load_frozen_representations(run_root)
         prospective = validate_prospective_predictions(run_root, representations)
-        primary_freeze = freeze_primary_contract(run_root)
         details = {
             "prospective_validation_rows": len(prospective),
-            "primary_discovery_frozen": True,
             "holdout_used_for_primary": False,
         }
-        outputs = [
-            run_root / "analysis" / "prospective_validation.csv",
-            primary_freeze,
-        ]
+        outputs = [run_root / "analysis" / "prospective_validation.csv"]
+    elif stage == "path_intervention_classification":
+        representations = load_frozen_representations(run_root)
+        qualification = pd.read_csv(
+            run_root / "analysis" / "path_temporal_qualification.csv"
+        )
+        edge_attempts = pd.read_csv(
+            run_root / "analysis" / "intervention_classifications.csv"
+        )
+        path_classification = classify_candidate_paths(
+            qualification, edge_attempts, representations
+        )
+        output = run_root / "analysis" / "path_intervention_classification.csv"
+        path_classification.to_csv(output, index=False)
+        selection = select_representative_paths(path_classification)
+        selection_path = run_root / "analysis" / "representative_path_selection.json"
+        selection_path.write_text(
+            json.dumps(selection, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        details = {
+            "classified_paths": len(path_classification),
+            "supported_paths": int(
+                (path_classification["path_classification"] == "supported").sum()
+            ),
+        }
+        outputs = [output, selection_path]
+    elif stage == "primary_freeze":
+        primary_freeze = freeze_primary_contract(run_root)
+        details = {"primary_discovery_frozen": True, "holdout_used_for_primary": False}
+        outputs = [primary_freeze]
     elif stage == "dose_response":
         verify_primary_contract(run_root)
         representations = load_frozen_representations(run_root)
@@ -345,6 +443,7 @@ def run_stage(
         outputs = _files(run_root, [
             "analysis/dose_response_effects.csv",
             "analysis/dose_response_summary.csv",
+            "analysis/path_dose_response_summary.csv",
         ])
     elif stage == "holdout_simulation":
         verify_primary_contract(run_root)
@@ -398,6 +497,8 @@ def run_stage(
             "analysis/holdout_path_confirmation.csv",
             "analysis/holdout_prospective_confirmation.csv",
             "analysis/holdout_mechanism_confirmation.csv",
+            "analysis/path_funnel_summary.csv",
+            "analysis/representative_path_selection.json",
         ])
     elif stage == "temporal_negative_control":
         verify_primary_contract(run_root)
@@ -420,6 +521,7 @@ def run_stage(
         verify_primary_contract(run_root)
         outputs = _files(run_root, [
             "analysis/temporal_negative_control.csv",
+            "analysis/path_temporal_negative_control.csv",
             "analysis/path_mechanism_attenuation.csv",
         ])
     elif stage == "robustness":
@@ -460,10 +562,10 @@ def run_stage(
     duration = time.perf_counter() - started
     manager.mark_stage_completed(stage, outputs, duration, details)
     manager.record_timestamp(f"{stage}_complete_unix_time")
-    if stage == "semantic":
+    if stage == "semantic_freeze":
         manager.record_timestamp("semantic_freeze_unix_time")
         manager.record_timestamp("prediction_freeze_unix_time")
-    elif stage == "prospective":
+    elif stage == "primary_freeze":
         manager.record_timestamp("primary_discovery_freeze_unix_time")
     reporter.finish_stage(stage)
 

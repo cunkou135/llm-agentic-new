@@ -108,7 +108,7 @@ def main() -> int:
     candidates = [
         {
             "source": "source", "target": "target",
-            "branch_id": "benchmark_branch", "expected_direction": "unknown",
+            "hypothesis_group_id": "benchmark_group", "expected_direction": "unknown",
         }
     ]
     count = _job_count(config)

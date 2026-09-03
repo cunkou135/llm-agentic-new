@@ -83,12 +83,14 @@ HOLDOUT_PATH_COLUMNS = [
     "path_id",
     "parameter",
     "direction",
+    "micro",
     "source",
     "meso",
     "macro",
     "micro_meso_confirmation",
     "meso_macro_confirmation",
     "classification",
+    "holdout_confirmed",
     "frozen_definition_sha256",
     "primary_result_unchanged",
 ]
@@ -97,13 +99,15 @@ HOLDOUT_PROSPECTIVE_COLUMNS = [
     "evaluation_track",
     "scenario",
     "prediction_id",
+    "candidate_path_id",
     "parameter",
     "intervention_direction",
-    "source_indicator",
-    "downstream_indicators",
+    "micro",
+    "meso",
+    "macro",
     "classification",
-    "observational_edges_retained",
-    "direction_matches",
+    "path_temporally_qualified",
+    "direction_supported",
     "onset_order_supported",
     "required_downstream_responses_supported",
     "prediction_sha256",
@@ -134,6 +138,9 @@ NEGATIVE_CONTROL_COLUMNS = [
     "candidate_edge_count",
     "retained_edge_count",
     "qualification_rate",
+    "candidate_path_count",
+    "qualified_path_count",
+    "path_qualification_rate",
     "stability",
     "primary_retained_edge_count",
     "retained_edge_difference_from_primary",
@@ -553,7 +560,7 @@ def holdout_path_confirmation(
         return _empty(HOLDOUT_PATH_COLUMNS)
     _require_columns(
         frozen_primary_paths,
-        {"scenario", "path_id", "parameter", "direction", "source", "meso", "macro"},
+        {"scenario", "path_id", "parameter", "direction", "meso", "macro"},
         "frozen primary paths",
     )
     _require_columns(
@@ -566,10 +573,13 @@ def holdout_path_confirmation(
         ["scenario", "path_id"], sort=True
     ):
         first = group.iloc[0]
+        micro_column = "micro" if "micro" in group.columns else "source"
         definition = {
             key: str(first[key])
-            for key in ("scenario", "path_id", "parameter", "direction", "source", "meso", "macro")
+            for key in ("scenario", "path_id", "parameter", "direction", "meso", "macro")
         }
+        definition["micro"] = str(first[micro_column])
+        definition["source"] = definition["micro"]
         subset = holdout_classifications[
             (holdout_classifications["scenario"].astype(str) == definition["scenario"])
             & (holdout_classifications["parameter"].astype(str) == definition["parameter"])
@@ -619,6 +629,7 @@ def holdout_path_confirmation(
                 "micro_meso_confirmation": confirmations[0],
                 "meso_macro_confirmation": confirmations[1],
                 "classification": classification,
+                "holdout_confirmed": classification == "confirmed",
                 "frozen_definition_sha256": _canonical_hash(definition),
                 "primary_result_unchanged": True,
             }
@@ -658,8 +669,9 @@ def holdout_prospective_confirmation(
     frozen_predictions: Mapping[str, Any],
     frozen_primary_graphs: Any,
     holdout_effects: pd.DataFrame,
+    representations: Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """Evaluate frozen predictions on holdout effects and frozen primary edges."""
+    """Evaluate candidate_path_id-bound predictions without selecting replacements."""
 
     scenarios = frozen_predictions.get("scenarios", frozen_predictions)
     if not scenarios:
@@ -672,62 +684,71 @@ def holdout_prospective_confirmation(
     rows: list[dict[str, Any]] = []
     for scenario, predictions in sorted(scenarios.items()):
         primary_pairs = _edge_pairs(frozen_primary_graphs, str(scenario))
+        paths = {
+            str(path["path_id"]): path
+            for path in (representations or {}).get(str(scenario), {}).get(
+                "candidate_paths", []
+            )
+        }
         for prediction in predictions:
-            criteria = prediction["validation_criteria"]
-            expected_edges = [
-                (str(edge["source"]), str(edge["target"]))
-                for edge in criteria["required_candidate_edges"]
-            ]
-            retained = [edge in primary_pairs for edge in expected_edges]
+            path_id = str(prediction["candidate_path_id"])
+            if path_id not in paths:
+                raise ValueError(f"holdout prediction references unknown frozen path {path_id}")
+            path = paths[path_id]
             indicators = [
-                str(prediction["source_indicator"]),
-                *(str(value) for value in prediction["downstream_indicators"]),
+                str(path["micro_indicator"]), str(path["meso_indicator"]),
+                str(path["macro_indicator"]),
             ]
+            expected_edges = list(zip(indicators, indicators[1:]))
+            retained = [edge in primary_pairs for edge in expected_edges]
             selected = holdout_effects[
                 (holdout_effects["scenario"].astype(str) == str(scenario))
-                & (holdout_effects["parameter"].astype(str) == str(prediction["parameter"]))
-                & (holdout_effects["direction"].astype(str) == str(prediction["intervention_direction"]))
+                & (holdout_effects["parameter"].astype(str) == str(path["parameter"]))
+                & (holdout_effects["direction"].astype(str) == str(path["intervention_direction"]))
                 & (holdout_effects["node_id"].astype(str).isin(indicators))
             ]
-            lookup = {
-                str(row.node_id): SimpleNamespace(**row._asdict())
-                for row in selected.itertuples(index=False)
-            }
-            source = lookup.get(indicators[0])
-            classification, matches, ordered, downstream_supported = (
-                classify_prediction_requirements(
-                    source,
-                    [lookup.get(node) for node in indicators[1:]],
-                    [
-                        prediction["expected_source_direction"],
-                        *prediction["expected_downstream_direction"],
-                    ],
-                    list(criteria["required_downstream_response"]),
-                    source_required=bool(criteria["required_source_response"]),
-                    order_required=bool(criteria["required_temporal_order"]),
-                    observational_edges_retained=retained,
+            lookup = {str(row.node_id): row for row in selected.itertuples(index=False)}
+            values = [lookup.get(node) for node in indicators]
+            signs = [
+                1 if expected == "increase" else -1
+                for expected in (
+                    path["expected_micro_response"], path["expected_meso_response"],
+                    path["expected_macro_response"],
                 )
+            ]
+            direction_matches = [
+                item is not None and bool(item.significant) and int(item.effect_sign) == sign
+                for item, sign in zip(values, signs)
+            ]
+            onsets = [float(item.onset_time) if item is not None else np.nan for item in values]
+            ordered = bool(
+                all(np.isfinite(value) and value >= 0 for value in onsets)
+                and np.all(np.diff(np.asarray(onsets, dtype=float)) >= 0)
             )
-            confirmation = {
-                "supported": "confirmed",
-                "contradicted": "failed_confirmation",
-                "manipulation_failure": "manipulation_failure",
-            }.get(classification, "inconclusive")
+            downstream_supported = all(
+                item is not None and bool(item.significant) for item in values[1:]
+            )
+            if values[0] is None or not bool(values[0].significant):
+                confirmation = "manipulation_failure"
+            elif any(item is None for item in values) or not downstream_supported:
+                confirmation = "inconclusive"
+            elif not all(direction_matches) or not ordered or not all(retained):
+                confirmation = "failed_confirmation"
+            else:
+                confirmation = "confirmed"
             prediction_hash = _canonical_hash(prediction)
             rows.append(
                 {
                     "evaluation_track": "holdout_confirmation",
                     "scenario": scenario,
                     "prediction_id": prediction["prediction_id"],
-                    "parameter": prediction["parameter"],
-                    "intervention_direction": prediction["intervention_direction"],
-                    "source_indicator": prediction["source_indicator"],
-                    "downstream_indicators": json.dumps(
-                        prediction["downstream_indicators"], ensure_ascii=False
-                    ),
+                    "candidate_path_id": path_id,
+                    "parameter": path["parameter"],
+                    "intervention_direction": path["intervention_direction"],
+                    "micro": indicators[0], "meso": indicators[1], "macro": indicators[2],
                     "classification": confirmation,
-                    "observational_edges_retained": json.dumps(retained),
-                    "direction_matches": json.dumps(matches),
+                    "path_temporally_qualified": all(retained),
+                    "direction_supported": all(direction_matches),
                     "onset_order_supported": ordered,
                     "required_downstream_responses_supported": downstream_supported,
                     "prediction_sha256": prediction_hash,
@@ -910,6 +931,21 @@ def temporal_negative_control(
             workers,
         )
         supports = [float(edge.support) for edge in graph if np.isfinite(edge.support)]
+        retained_group_edges = {
+            (edge.source, edge.target, edge.hypothesis_group_id) for edge in graph
+        }
+        frozen_paths = list(representation.get("candidate_paths", []))
+        qualified_paths = sum(
+            (
+                str(path["micro_indicator"]), str(path["meso_indicator"]),
+                f"macro_outcome_{path['macro_indicator']}",
+            ) in retained_group_edges
+            and (
+                str(path["meso_indicator"]), str(path["macro_indicator"]),
+                f"macro_outcome_{path['macro_indicator']}",
+            ) in retained_group_edges
+            for path in frozen_paths
+        )
         primary_count = (
             len(primary_retained_edges) if primary_retained_edges is not None else None
         )
@@ -922,6 +958,9 @@ def temporal_negative_control(
                 "candidate_edge_count": len(candidates),
                 "retained_edge_count": retained,
                 "qualification_rate": retained / max(len(candidates), 1),
+                "candidate_path_count": len(frozen_paths),
+                "qualified_path_count": qualified_paths,
+                "path_qualification_rate": qualified_paths / max(len(frozen_paths), 1),
                 "stability": float(np.mean(supports)) if supports else float("nan"),
                 "primary_retained_edge_count": primary_count if primary_count is not None else np.nan,
                 "retained_edge_difference_from_primary": (

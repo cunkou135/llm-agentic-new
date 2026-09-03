@@ -1,6 +1,6 @@
 # 正式运行手册
 
-## 0. 一次性安装
+## 1. 安装与 API 配置
 
 在本目录打开 PowerShell：
 
@@ -10,199 +10,151 @@ python -m venv .venv
 Copy-Item config\llm_api.example.json config\llm_api.local.json
 ```
 
-## 第一步：填写 API
+编辑 `config\llm_api.local.json`，填写 OpenAI-compatible endpoint、密钥、模型、
+单次输出上限、timeout 和 retry。该本地文件已被忽略；provenance 只保存脱敏配置。
+正式运行缺少密钥时会失败，不会自动换成 mock。
 
-编辑 `config\llm_api.local.json`：
+## 2. 正式运行
 
-```json
-{
-  "base_url": "你的 OpenAI-compatible base URL",
-  "api_key": "你的密钥",
-  "model": "你的模型名",
-  "temperature": 0.1,
-  "max_tokens": 12000,
-  "timeout": 300,
-  "max_retries": 2
-}
-```
-
-只有 `src\emergence_attribution\llm_client.py` 会访问模型 API。local 文件已加入 `.gitignore`；provenance 只保存脱敏配置，不保存明文密钥。缺少密钥时 semantic stage 会直接失败，不会用 mock 替代正式输出。
-
-## 第二步：执行正式实验（唯一推荐命令）
-
-`res1` 是旧尺度合同下的 development/pilot evidence，必须保留但不得 resume、
-复制或与新协议结果拼接。新协议必须从 semantic stage 开始，并使用从未出现过的
-run-id。下面以 `formal_scale_v2_001` 为例；若该目录已经存在，请换另一个全新 ID，
-不要覆盖。
-
-该命令按冻结顺序一次完成语义、两段仿真、分析、导出与 Figure 2--8 渲染：
+必须使用从未出现过的 run ID。旧 `res_f` 和旧 seed 仅作为 development
+evidence，不得 resume、复制或拼接到新结果。
 
 ```powershell
 .\.venv\Scripts\python run_experiment.py `
   --config config\experiment.json `
   --llm-config config\llm_api.local.json `
-  --run-id formal_scale_v2_001 `
+  --run-id confirmatory_path_v4_001 `
   --workers auto `
   --plot-repo "..\llm-agentic-dis"
 ```
 
-正式阶段顺序固定为：
+正式阶段固定为：
 
 ```text
-semantic -> baseline_simulation -> temporal -> intervention_simulation -> intervention -> prospective -> robustness -> export -> render
+indicator_generation
+indicator_freeze
+path_generation
+semantic_freeze
+baseline_simulation
+temporal
+path_temporal_qualification
+intervention_simulation
+intervention
+path_intervention_classification
+prospective
+primary_freeze
+dose_response
+holdout_simulation
+holdout_confirmation
+temporal_negative_control
+robustness
+export
+render
 ```
 
-如需显式指定 12 个进程，可把 `--workers auto` 改为 `--workers 12`。`auto` 会采用 `min(cpu-1, 12)` 的内存友好上限。
+前 6 次 LLM 调用只生成 indicators。前 3 次可参与 data-blind selection，后 3
+次仅用于 replication。指标冻结后，第二类调用使用 1 个 primary 加 2 个
+replication-only generations 生成完整路径；只有第一个 accepted primary 进入后续
+实验。Phase B 同时生成 6 条绑定 `candidate_path_id` 的 prospective predictions，
+并在 baseline 前完成哈希冻结。后面的 `prospective` stage 只是验证，不重新生成。
 
-用于故障恢复的分阶段命令如下；正常首次运行不要使用这些命令：
+## 3. 分阶段恢复
 
-```powershell
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage semantic
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage baseline_simulation --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage temporal --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage intervention_simulation --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage intervention --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage prospective --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage robustness --resume
-.\.venv\Scripts\python run_experiment.py --config config\experiment.json --llm-config config\llm_api.local.json --run-id formal_scale_v2_001 --workers auto --stage export --resume
-```
-
-## 第三步：查看实时进度
-
-终端会显示 Overall experiment、当前 stage、completed/total、百分比、elapsed、ETA、workers 和当前 scenario/parameter/replicate。
-
-持久进度日志位于：
-
-```text
-runs\formal_scale_v2_001\logs\progress.jsonl
-```
-
-即使进程异常退出，该 JSONL 也保留最后完成的位置。
-
-## 第四步：失败后 resume
-
-使用原来的 config、LLM model settings、代码和 run-id，加 `--resume`：
+通常应运行完整命令。中断后使用原 run ID 和完全相同的配置、代码、模型设置，
+加 `--resume`。如需只恢复一个阶段：
 
 ```powershell
 .\.venv\Scripts\python run_experiment.py `
   --config config\experiment.json `
   --llm-config config\llm_api.local.json `
-  --run-id formal_scale_v2_001 `
+  --run-id confirmatory_path_v4_001 `
   --workers auto `
-  --resume `
-  --plot-repo "..\llm-agentic-dis"
+  --stage path_generation `
+  --resume
 ```
 
-Semantic resume 是 generation-level：若某个
-`llm\<scenario>\generation_*\generation_result.json` 已接受，程序会先校验
-prompt/request/response/accepted payload/result 的哈希，然后跳过该 generation。
-缺失 sidecar、哈希不一致或当前 prompt contract 不一致都会 fail closed；已有
-request/response 不会被静默覆盖。
+把 `path_generation` 换成需要恢复的阶段名即可。依赖阶段未完成会失败。每轮
+LLM 的 prompt、request、response、accepted payload 和 SHA256 均保存在
+`llm\indicator\...` 或 `llm\path\...`。任何不一致都会 fail closed；baseline
+开始后禁止重跑语义阶段。
 
-## Stage 3 与指标口径
-
-- 16/8/4、四 branches、28--48 edges、三次独立生成与最多三轮 repair 是本次
-  实验冻结的 representation capacity control，不是方法理论上的固定节点数。
-- Micro 必须对应 individual/interaction/elementary/local primitive；Meso 必须
-  实际使用 district/group/neighborhood/community/local-domain 结构算子；Macro
-  的 `entity_scope` 必须为 `whole_system`。
-- rolling mean/std、difference、单调 clip、常数加减乘除等包装在 canonical
-  lineage 中会被剥离；若跨尺度两端核心计算相同且目标没有引入新中尺度结构，
-  candidate edge 以 `trivial_cross_scale_transform` 拒绝。
-- 干预或 mechanism-disabled 条件若真实消除了某类事件，条件事件指标允许保存
-  NaN 并在 Stage 3 判为 inconclusive；baseline 全 NaN 仍然 fail closed。
-
-- Micro->Meso 使用 direct Micro manipulation root，范围标记为 `direct_root`。
-- Meso->Macro 沿同一候选/保留路径寻找上游 Micro root，仅修改其真实 simulator parameter，范围标记为 `upstream_mediated`。
-- `directionally_contradicted` 是唯一的方向矛盾名称。
-- Full Discovery 的 contradiction rate 分母为除 `not_applicable` 外的全部适用尝试；`manipulation_failure` 保留在分母中。
-- Controlled intervention recall 的分母仅包含具有合法 manipulation route 的 truth edges；其余 truth edges 为 `not_applicable`，不是 false negative。
-- unrestricted temporal qualification 使用实际 `N*(N-1)` candidate space；28 个节点时分母为 756。
-- unrestricted temporal search 同时移除 structured candidate-edge constraints
-  和 semantic branch constraints；lag range、OLS、screening threshold、BH
-  procedure、whole-trajectory bootstrap repetitions 与 support threshold 保持
-  不变。也就是说核心估计/重采样过程一致，但 hypothesis space 与 semantic
-  FDR grouping 不再受结构约束。
-- `without_structured_representation` 使用同一定义，不应描述为“仅 candidate
-  space 不同”。
-- 干预先按 source->target 聚合：任何 `directionally_contradicted` 优先于
-  `supported`；若无明确矛盾，至少一个 `supported` 可覆盖另一侧的
-  `manipulation_failure`。
-- `mechanism_disabled_checks.csv` 的整体 retained-graph 指标只描述一个目标
-  机制被禁用后的点图；不要求或暗示所有无关系统 dynamics 消失。
-- Figure 7 只接受 Micro/Meso/Macro 均显著、onset 有序且两条 Full Method intervention edge 均为 `supported` 的路径。
-
-程序会核对 source/config/API-public-config/stage artifact hashes。已经验证成功的 task 或 stage 会跳过；hash 不一致会 fail closed，并要求新 run-id。不要手工修改 run 内 CSV、JSON、Parquet、NPZ 或图数据。
-
-## 第五步：正式数据保存位置
-
-全部正式数据位于：
+实时进度：
 
 ```text
-runs\formal_scale_v2_001\
+runs\confirmatory_path_v4_001\logs\progress.jsonl
 ```
 
-关键目录：
+## 4. 科学判定口径
 
-- `config\`：冻结的 experiment snapshot 和脱敏 API 配置。
-- `provenance\`：run/source/stage manifests、环境、全部 artifact SHA256。
-- `llm\`：两个场景各三代的 prompt、request、response、repair 和 validation。
-- `representation\`：最终表征、agreement、validation、冻结 prospective predictions。
-- `data\raw_logs\`：384 个仅含公开字段的正式原始仿真文件。
-- `data\reference_hidden\`：与公开 NPZ 物理隔离的 Controlled Recovery 隐藏参考文件；不得提供给语义生成或 Full Discovery。
-- `data\indicator_trajectories_*.parquet`：由冻结表征计算的 baseline/complete 指标轨迹。
-- `analysis\full_discovery_results.csv`：不含隐藏真值对齐指标的发现轨结果。
-- `analysis\controlled_recovery_results.csv`：固定隐藏已知基准上的恢复指标。
-- `analysis\main_results.csv`：带 `evaluation_track` 标签的合并索引表。
-- `analysis\`：其余 temporal、bootstrap、paired effects、intervention、robustness、prospective validation 和 attribution objects。
-- `visualization_input\`：Figure 2--8 的动态输入 bundle。
-- `figures\`、`tables\`：论文图和表格 source data。
+- Phase A 固定 16 Micro、8 Meso、4 Macro，不输出关系、路径或预测。
+- Phase B 只能引用冻结 ID；每场景固定 16--24 条完整路径。
+- derived candidate edges 只由 frozen paths 自动投影和去重。
+- Stage 2 仍估计相邻关系，但 BH/FDR family 由路径的 Macro endpoint 事前定义。
+  两条关系在对应 Macro group 内都 retained，完整路径才 temporally qualified。
+- Stage 3 只改变真实 simulator parameter。只有 manipulation、三尺度响应、两条
+  relation evidence、冻结方向、严格 onset order 和 observational lag 全部满足时，
+  路径才是 `supported`。证据不足是 `inconclusive`，不得并入 supported。
+- `baseline_sd=0` 的标准化效应为 NaN、significant 为 False、onset 为 -1；raw
+  effect 保留。
+- Primary 只使用 minus/plus；mid doses 只进入 secondary dose analysis。
+- Holdout 只确认 frozen primary paths，不生成 replacement path，不修改 primary
+  classification、lag 或 threshold。
+- Representative 只能来自 frozen supported paths。优先 holdout-confirmed 后按
+  path ID 排序；无候选时保存 null。
+- Figure 5/7 只绘制真实 supported frozen path，不跨 parameter、direction、root
+  或 hypothesis group 借用 evidence。
 
-## 第六步：生成 Figure 2--8
+## 5. Seeds 与任务数
 
-若正式命令因 `--no-render` 或渲染故障停在绘图前，可从冻结输入动态补绘：
+- Primary：3101--3124，共 24 个。
+- Holdout：4101--4112，共 12 个，和 primary 不重叠。
+- Primary：每场景 24 seeds x（baseline + 12 dose intervention conditions +
+  mechanism-disabled）= 672 trajectories。
+- Holdout：每场景 12 seeds x（baseline + 6 extreme intervention conditions +
+  mechanism-disabled）= 192 trajectories。
+- 总计：864 trajectories。
+
+## 6. 结果位置
+
+所有正式结果位于：
+
+```text
+runs\confirmatory_path_v4_001\
+```
+
+重点目录：
+
+- `config\`：冻结的实验与脱敏 API 配置。
+- `provenance\`：source、stage、artifact hashes 和环境记录。
+- `llm\indicator\`、`llm\path\`：两个独立 LLM 阶段的完整历史。
+- `representation\`：冻结 indicators、paths、derived edges、predictions 和
+  replication metrics。
+- `data\primary\raw_logs\`：公开 primary NPZ。
+- `data\holdout\raw_logs\`：物理隔离的 holdout NPZ。
+- `data\**\reference_hidden\`：仅 Controlled Recovery 可用的隐藏参考文件。
+- `analysis\`：temporal、intervention、path funnel、dose、holdout、negative
+  control、robustness、prospective 和 attribution 输出。
+- `visualization_input\`、`figures\`、`tables\`：动态导出和论文图表。
+
+不要手工修改 run 内 JSON、CSV、Parquet、NPZ 或哈希 sidecar。
+
+## 7. 开发检查
+
+```powershell
+python -m pytest -q
+python smoke_pipeline.py --run-id smoke_local --workers 1
+python run_dev_e2e.py --run-id dev_local --workers 2
+```
+
+开发运行使用 mock LLM、较少 seeds 和较少 bootstrap，只验证执行合同。输出位于
+`smoke_runs\` 或 `dev_runs\`，明确不是科学证据。不得因开发结果是否出现
+supported path 而调整 FDR、support、effect、onset 或 lag tolerance。
+
+如渲染阶段需要单独恢复：
 
 ```powershell
 .\.venv\Scripts\python render_paper_figures.py `
-  --run runs\formal_scale_v2_001 `
+  --run runs\confirmatory_path_v4_001 `
   --plot-repo "..\llm-agentic-dis" `
   --formats png svg pdf
 ```
-
-需要 TIFF 时加 `tiff`。渲染器动态读取实际 node/branch 名称，不依赖 frozen path、旧 node ID、旧 row count 或旧 hash。它明确使用 mean effect curve、完整 effect-matrix 色域，并以高可见度显示 added edges。
-
-若要把数据 bundle 复制到本地绘图库供单独归档：
-
-```powershell
-.\.venv\Scripts\python export_visualization_bundle.py `
-  --run runs\formal_scale_v2_001 `
-  --plot-repo "..\llm-agentic-dis"
-```
-
-该命令写入绘图库的 `data\generated_runs\formal_scale_v2_001\`；若目标已存在会拒绝覆盖。科学绘图参数只读取 run 内冻结配置；本地绘图库仅作为原始视觉语言的已校验参考。
-
-## 第七步：可直接用于论文的文件
-
-优先使用：
-
-- `analysis\main_results.csv`
-- `analysis\full_discovery_results.csv`
-- `analysis\controlled_recovery_results.csv`
-- `analysis\main_graphs.jsonl`
-- `analysis\data_efficiency_repeated_subsampling.csv`
-- `analysis\paired_effects.parquet`
-- `analysis\effect_curves.parquet`
-- `analysis\intervention_classifications.csv`
-- `analysis\comparative_method_intervention_evidence.csv`
-- `analysis\path_timing_summary.csv`
-- `analysis\observation_robustness.csv`
-- `analysis\causal_scalability.csv`
-- `analysis\prospective_validation.csv`
-- `analysis\attribution_objects.json`
-- `tables\*_source.csv`
-- `figures\figure_2_*` 至 `figures\figure_8_*`
-- `visualization_input\figure_inputs.generated.json`
-- `visualization_input\SHA256SUMS`
-- `figures\render_manifest.json`
-
-只有 run 完成并生成 `RUN_FROZEN` 后，才把它作为完整正式 release。`smoke_runs\` 下的任何文件都不能用于论文。

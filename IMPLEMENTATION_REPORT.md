@@ -1,215 +1,161 @@
-# Pre-formal scale-protocol upgrade implementation report
+# Path-centered protocol implementation report
 
-Date: 2026-09-02
+## 1. Previous Stage 1
 
-Status: implementation and non-scientific development verification complete.
-No real LLM API and no formal 24-seed experiment were executed.
+The previous contract asked one LLM response to define indicators, arbitrary
+indicator groups, candidate relations, and prospective predictions. Stage 2
+qualified relations, Stage 3 evaluated retained relations, and complete paths
+were reconstructed afterward. That design could leave individually supported
+relations without a prospectively coherent complete mechanism path.
 
-## 1. Method unchanged
+## 2. New two-phase Stage 1
 
-The existing project was upgraded in place. The paper's three-stage method and
-prospective protocol remain unchanged:
+`indicator_generation` makes six Phase A calls per scenario. Each call can
+return only executable indicators. The selected generation is chosen from the
+first three by validator validity, public-source diversity, direct Micro
+parameter coverage, Meso structural diversity, Macro concept diversity,
+repair count, and a canonical hash tie-break. The final three calls are
+replication-only.
 
-```text
-semantic -> baseline_simulation -> temporal -> intervention_simulation
-         -> intervention -> prospective -> robustness -> export -> render
-```
+`indicator_freeze` writes the selected 28 indicators and their SHA256.
+`path_generation` then makes one primary plus two replication-only Phase B
+calls over that exact frozen set. Phase B cannot add or edit indicators. The
+first valid primary response supplies the formal paths and prospective
+predictions; downstream numerical results never participate in selection.
 
-Stage 2 still uses level-based standardized lagged OLS, target self-history,
-competing candidate parents, lags 1--5, parent alpha 0.10, branch-local BH/FDR
-0.05, 100 whole-trajectory bootstraps, and support 0.65. Stage 3 still uses
-parameter-only matched interventions, 500 paired bootstraps, 95% intervals,
-effect threshold 0.10, four consecutive steps, evaluation start 15, terminal
-window 24, and lag tolerance 2. Formal configuration validation now explicitly
-fails if any of these frozen values, the 24 seeds, or the representation
-capacity settings are changed.
+## 3. Removal of arbitrary indicator grouping
 
-The 16 Micro / 8 Meso / 4 Macro, four-branch, 28--48-edge contract with three
-independent generations and three repair rounds is documented as this
-experiment's representation capacity control, not as a universal theoretical
-requirement of the method.
+The LLM schemas, prompts, frozen indicator payloads, full-discovery candidate
+relations, temporal records, robustness operators, rendering interfaces, and
+documentation no longer contain the former arbitrary grouping field. The only
+statistical grouping is `hypothesis_group_id`, deterministically derived from a
+frozen path's Macro endpoint before data exist.
 
-## 2. Modified files
+## 4. Indicator Generation schema
 
-- Protocol/configuration: `config/experiment.json`,
-  `config/dev_experiment.json`, `config/semantic_prompt.txt`.
-- Simulator and public schema: `src/emergence_attribution/simulators.py`,
-  `src/emergence_attribution/raw_schemas.py`.
-- Safe DSL and semantic contract: `src/emergence_attribution/dsl.py`,
-  `src/emergence_attribution/schemas.py`,
-  `src/emergence_attribution/semantic.py`,
-  `src/emergence_attribution/predefined.py`.
-- Controlled Recovery and orchestration safeguards:
-  `src/emergence_attribution/reference_truth.py`,
-  `src/emergence_attribution/pipeline.py`,
-  `src/emergence_attribution/simulation.py`,
-  `src/emergence_attribution/interventions.py`.
-- Tests: `tests/test_dsl_and_schema.py`,
-  `tests/test_final_remediation.py`, `tests/test_protocol_upgrade.py`.
-- Documentation: `README.md`, `RUNBOOK.md`, `IMPLEMENTATION_PLAN.md`,
-  `IMPLEMENTATION_REPORT.md`, `FINAL_AUDIT.md`.
+`IndicatorGeneration` contains `scenario`, `phenomenon`, `indicators`, and
+`interpretation_boundary`. Each `IndicatorSpec` contains its ID, scientific
+semantics, scale/entity scope, public source fields, executable DSL AST,
+temporal aggregation, parameter associations, and rationale. Pydantic forbids
+all extra fields, so Phase A rejects candidate relations, candidate paths, and
+prospective predictions.
 
-## 3. Schelling scenario upgrade
+## 5. Path Generation schema
 
-The periodic grid, two fixed groups, dissatisfaction, relocation, destination
-preference, and the three existing intervention parameters are retained. The
-30 x 30 formal grid is partitioned deterministically into 3 x 3 fixed spatial
-districts. Development grids use the same integer partition rule, including
-uneven dimensions. Relocation still samples vacancies over the whole periodic
-grid; a district is therefore an environment primitive, not a confinement rule
-or precomputed segregation answer.
+`PathGeneration` contains `scenario`, `indicator_set_sha256`,
+`candidate_paths`, and `prospective_predictions`. Each `CandidatePath` freezes
+the real parameter and direction, exact Micro/Meso/Macro IDs, two relation
+directions, three expected responses, rationale, mechanism explanation, and a
+falsification condition. Each `ProspectivePrediction` references an existing
+`candidate_path_id`.
 
-At the start of each recorded step, every agent's current position is mapped to
-its fixed cell district. Moore-neighborhood calculations remain periodic.
-`disable_homophilic_relocation` still removes only preferential destination
-selection.
+## 6. CandidatePath capacity contract
 
-## 4. Deffuant scenario upgrade
+Every scenario must contain 16--24 unique indicator triples. All three
+controllable parameters need at least four paths. Every one of the four frozen
+Macro indicators needs at least two paths. Scale, direct Micro association,
+public-field executability, genuine Meso organization, adjacent-scale
+non-triviality, and Micro--Macro lineage checks fail closed.
 
-The initial Watts--Strogatz network, bounded-confidence assimilation,
-rejection, backfire, and the three existing intervention parameters are
-retained. Two public fixed mechanism constants are centralized in scenario
-configuration:
+## 7. Path projection to unique relations
 
-- adaptive rewiring probability: 0.15;
-- weak homophilic choice probability: 0.65.
+For every frozen path, the program projects Micro-to-Meso and Meso-to-Macro.
+It deduplicates exact source/target pairs, records every contributing path ID,
+and attaches every relevant Macro-outcome group. Conflicting prospective
+directions are preserved as `mixed`; they are not silently resolved.
 
-After a rejected or backfire encounter, an independent counter-keyed draw may
-replace the sampled tie. Candidates exclude the focal node, old partner, and
-current neighbors. A small deterministic random-priority candidate sample is
-used; the weak-homophily draw selects the closest-opinion candidate within that
-sample. Every step preserves a simple undirected graph, constant edge count,
-and at least one tie per agent. The saved edge list is the network used at the
-start of that step; successful rewiring affects the next step.
+## 8. FDR hypothesis groups
 
-`disable_backfire` sets only repulsive opinion-update strength to zero. Distant
-encounters remain rejected and continue to use the adaptive rewiring rule.
+The group is `macro_outcome_<macro_indicator_id>`. A relation used by paths to
+multiple Macro endpoints is fitted once but participates separately in each
+predefined multiple-testing family, producing group-specific q-values. No
+group is adjusted from observed p/q values.
 
-## 5. Public raw-schema additions
+## 9. Stage 2 complete-path decision
 
-Schelling adds primitive `agent_id[agent]` and
-`district_id[time,agent]`; existing `agent_position`, `agent_group`, local event
-fields, and `state_grid` remain available. No district entropy, segregation,
-turnover score, or Meso label is logged.
+Stage 2 retains the unchanged standardized lagged OLS, target self-history,
+competing parents, lag 1--5, parent alpha 0.10, BH/FDR 0.05, whole-trajectory
+bootstrap 100, and support 0.65. A frozen path is temporally qualified only if
+both adjacent relations are retained inside that path's Macro-outcome group.
+All candidate paths, including failures, are written to
+`path_temporal_qualification.csv`.
 
-Deffuant changes `network_edges` from a static edge list to
-`network_edges[time,edge,endpoint]` and adds
-`edge_rewired[time,agent]`. The existing opinion, partner, distance,
-acceptance/rejection/backfire, and shift fields remain. No community ID,
-modularity, echo-chamber score, polarization cluster, or hidden truth is logged.
+## 10. Stage 3 complete-path decision
 
-## 6. Generic DSL additions
+A temporally qualified path is `supported` only when the true parameter
+manipulation succeeds, required Micro/Meso/Macro responses are significant,
+both adjacent intervention classifications are supported for the same
+scenario/parameter/direction/root, frozen directions agree, onset ordering
+satisfies the original rule, and observational lag consistency holds. A clear
+directional contradiction yields `contradicted`; a failed root manipulation
+yields `manipulation_failure`; remaining insufficient evidence is
+`inconclusive`.
 
-The safe declarative DSL adds:
+## 11. Prospective binding
 
-- `rolling_std`;
-- `group_reduce` with mean, sum, count, fraction, variance, standard deviation,
-  or categorical entropy;
-- `network_neighborhood_reduce` with generic local reducers;
-- dynamic `network_assortativity` and `network_density` support;
-- `network_component_count`;
-- `network_largest_component_fraction`.
+Six predictions per scenario are emitted in Phase B, each keyed by a frozen
+`candidate_path_id`, and hashed before baseline simulation. The later
+`prospective` stage evaluates those immutable predictions; it cannot invent a
+replacement path.
 
-AST type/dimension validation precedes execution. Dynamic edge slices reject
-non-finite/out-of-range endpoints, self-loops, and duplicate undirected edges.
-No-neighbor or absent-event quantities have explicit NaN behavior. An
-all-undefined baseline indicator still fails closed; an intervention that
-legitimately removes every conditioned event preserves NaN for Stage 3 to mark
-inconclusive. A zero-row path result is written with a stable CSV schema rather
-than as a malformed headerless file.
+## 12. Holdout confirmation
 
-## 7. Stage 1 scale contract
+Holdout uses only independent seeds and frozen primary paths. It does not
+regenerate semantics, select relations/lags/thresholds, or replace a failed
+path. Confirmation output preserves `primary_result_unchanged=true`.
 
-`IndicatorSpec` now contains a machine-readable `entity_scope`.
+## 13. New confirmatory seed pool
 
-- Micro accepts `individual`, `interaction`, `elementary_event`, or
-  `local_process` and must derive from a public agent/interaction/cell/edge
-  primitive. Population prevalence of an elementary event remains valid Micro.
-- Meso accepts `neighborhood`, `district`, `community`, `cluster`, or
-  `local_domain` and must actually use a group/network structural operation.
-- Macro requires `whole_system`.
+Primary seeds are 3101--3124 and holdout seeds are 4101--4112. They are fixed,
+disjoint, and validated at config load. The old 1101--1124 and 2101--2112 pools
+are treated as development evidence and are not reused for the new
+confirmatory run.
 
-The prompt explains these scientific entities without supplying fixed
-observable names. The LLM still selects semantics, computations, branches,
-candidate edges, parameter associations, and prospective predictions.
+## 14. Formal simulator task count
 
-## 8. Trivial cross-scale transform rule
+The formal task matrix remains 864 trajectories: 672 primary plus 192
+holdout. The protocol increases path-hypothesis richness without increasing
+simulator workload.
 
-Each cross-scale candidate edge is compared through a canonical computational
-lineage. Identity/temporal aggregation, rolling mean/std, time difference,
-negation, square-root/log transformations, clipping, and constant
-add/subtract/multiply/divide/safe-ratio wrappers are stripped. If source and
-target then have the same core computation and the target introduces no new
-group/network/spatial structural operator, validation rejects the edge with:
+## 15. Automated tests
 
-```text
-trivial_cross_scale_transform
-```
+The repository test suite contains 175 passing tests. It covers Phase A
+forbidden outputs and scale rules; freeze/hash failures; exact Phase B
+references, capacity, coverage and duplicate rejection; deterministic relation
+projection; group-specific path qualification; strict path intervention
+classes; prospective binding; holdout immutability; exact-ID replication; seed
+and 864-task contracts; and all unchanged Stage 2/3 threshold gates.
 
-Thus nested rolling windows, differencing, and constant rescaling cannot form a
-Micro -> Meso -> Macro mechanism. Rolling operations remain legal inside a
-scientifically distinct whole-system indicator.
+## 16. Toy smoke
 
-## 9. Controlled Recovery update
+`smoke_runs/path_protocol_v4_20260903` completed successfully with deterministic
+toy data. It is explicitly marked non-scientific and is not evidence for any
+paper claim.
 
-The fixed hidden-known benchmark was synchronized with the simulator revision.
-Schelling hidden channels are anchored to district-level heterogeneity and
-whole-grid spatial contexts. Deffuant hidden channels are anchored to dynamic
-network-neighborhood statistics and now include an adaptive-rewiring Micro
-process/branch. Guaranteed delayed Micro -> Meso -> Macro channels remain
-separately labelled Controlled Recovery; they are not generated-node answers.
+## 17. Development E2E
 
-## 10. Hidden-truth isolation
+The inexpensive deterministic mock run
+`dev_runs/path_protocol_v4_split_20260903` passed all 19 stages and its final
+contract audit. It verified required files, immutable references, path outputs,
+holdout non-replacement, exports, and rendering. It produced zero supported
+paths; this was preserved as a non-scientific dev outcome and correctly did not
+trigger protocol adjustment. Dev acceptance does not require a supported path.
 
-Semantic generation receives `public_raw_schema()` only and contains an
-explicit hidden-field denylist. Public and hidden NPZ payloads are written to
-separate directories with separate hashes. Full Discovery semantic, temporal,
-and intervention modules do not import `reference_truth` and do not read
-`mechanism_channel`. Only the controlled module combines public primitives with
-the hidden-known channels. Generated nodes are not aligned to truth; Full
-Discovery F1/SHD/lag-MAE remain N/A.
+## 18. Unresolved scientific correctness blockers
 
-## 11. Matched-seed RNG contract
+No unresolved implementation-level scientific-contract blocker is known. This
+does not assert that any path is scientifically supported: no new formal run
+has been executed, so scientific outcomes remain unknown until the user runs
+the frozen confirmatory protocol.
 
-Initial states and initial networks are functions only of scenario and seed.
-Existing partner/activation streams retain their keys. Adaptive rewiring uses
-independent streams for trigger, homophily choice, and per-agent candidate
-priority (`seed + time + event stream + agent`). Because each draw is produced
-by a counter-based generator, a missing assimilation/backfire event does not
-shift later global RNG state. Regression tests verify bitwise reruns, equal
-initial states across minus/baseline/plus, aligned time-zero partner streams,
-preserved rewiring under `disable_backfire`, and stable public/hidden payload
-digests.
+## Final invariants
 
-## 12. Non-scientific verification
-
-- Pytest: **111 passed**.
-- Toy smoke: **PASS** at
-  `smoke_runs/protocol_upgrade_20260902_01/`; the report states
-  `scientific_evidence=false`.
-- Final two-scenario dev E2E: **PASS** at
-  `dev_runs/protocol_upgrade_20260902_04/`.
-- All nine stages completed, the dev run is frozen, 245 artifacts were hashed,
-  seven PNG figures rendered, `formal_output=false`, and
-  `real_llm_api_called=false`.
-- Semantic and prediction freeze timestamps precede baseline simulation start.
-- The small mock Full Discovery run legitimately produced no complete supported
-  path; it was not treated as a failure and no threshold was relaxed. These dev
-  counts are not paper evidence.
-
-## 13. Academic handling and remaining blockers
-
-The prior `res1` release remains development/pilot evidence showing that the
-earlier scale contract permitted mathematically nested observables to occupy
-different scales. It was not deleted, resumed, or used as scientific input to
-this implementation. The next formal run must begin with semantic generation,
-use a fresh run id, and never combine old and new scientific artifacts.
-
-No unresolved scientific-correctness blocker was found in the upgraded code
-under the permitted tests. This means the implementation is ready to start a
-new formal run; it does **not** mean the revised method is guaranteed to recover
-or intervention-support any path. That remains a formal experimental result.
-
-No real LLM API, formal simulation, formal 100-bootstrap Stage 2 analysis,
-formal 500-bootstrap Stage 3 analysis, or new paper result was produced during
-this upgrade.
+- Simulator core unchanged.
+- Stage 2 model and thresholds unchanged.
+- Stage 3 thresholds unchanged.
+- Onset definition unchanged.
+- `res_f` preserved as development evidence.
+- No hidden truth used in Full Discovery indicator/path/prediction generation
+  or numerical discovery.
+- No real LLM API called during implementation.
+- No formal scientific experiment executed during implementation.

@@ -11,7 +11,7 @@ import pytest
 from emergence_attribution.controlled import controlled_intervention_recovery_metrics
 from emergence_attribution.dsl import compute_indicator, expression_fields
 from emergence_attribution.interventions import aggregate_edge_intervention_evidence
-from emergence_attribution.mock_semantic import mock_generation
+from emergence_attribution.mock_semantic import mock_generation, mock_path_generation
 from emergence_attribution.pipeline import load_experiment_config
 from emergence_attribution.raw_schemas import public_raw_schema
 from emergence_attribution.reference_truth import (
@@ -28,7 +28,7 @@ from emergence_attribution.robustness import (
     _metric_row,
     run_data_efficiency,
 )
-from emergence_attribution.schemas import SemanticGeneration
+from emergence_attribution.schemas import PathGeneration, SemanticGeneration
 from emergence_attribution.semantic import validate_generation
 from emergence_attribution.simulators import run_scenario_with_hidden
 from emergence_attribution.temporal import TemporalEdge, representation_candidates, stable_seed
@@ -49,7 +49,7 @@ def _edge(source: str, target: str) -> TemporalEdge:
         support=0.8,
         lag_support=0.7,
         lag_std=0.1,
-        branch_id="b",
+        hypothesis_group_id="macro_outcome_b",
     )
 
 
@@ -126,7 +126,7 @@ def test_representation_robustness_uses_mutated_candidate_count() -> None:
     original_count = len(representation_candidates(representation))
     expected_direction = {
         "delete_candidate_relation": -1,
-        "cross_branch_relation": 1,
+        "cross_hypothesis_group_relation": 1,
         "irrelevant_indicator": 1,
     }
     for index, (operator, direction) in enumerate(expected_direction.items()):
@@ -195,11 +195,11 @@ def test_data_efficiency_n1_stability_is_not_estimable(
     representation = {
         "scenario": "toy",
         "indicators": [
-            {"id": "a", "branch_id": "b", "scale": "micro"},
-            {"id": "b", "branch_id": "b", "scale": "meso"},
+            {"id": "a", "scale": "micro"},
+            {"id": "b", "scale": "meso"},
         ],
         "candidate_edges": [
-            {"source": "a", "target": "b", "branch_id": "b", "expected_direction": "unknown"}
+            {"source": "a", "target": "b", "hypothesis_group_ids": ["macro_outcome_b"], "expected_direction": "unknown"}
         ],
     }
     baseline = pd.DataFrame(
@@ -311,63 +311,38 @@ def _generation_validation(payload: dict) -> dict:
     )
 
 
-def test_prospective_required_edges_exactly_match_prediction_path() -> None:
-    payload = mock_generation("schelling")
-    assert _generation_validation(payload)["valid"]
-    missing = copy.deepcopy(payload)
-    missing["prospective_predictions"][0]["validation_criteria"]["required_candidate_edges"].pop()
-    result = _generation_validation(missing)
-    assert any("exactly equal" in error for error in result["errors"])
+def test_prospective_prediction_must_reference_a_frozen_path() -> None:
+    payload = mock_path_generation("schelling")
+    payload["prospective_predictions"][0]["candidate_path_id"] = "missing_path"
+    with pytest.raises(Exception, match="unknown path"):
+        PathGeneration.model_validate(payload)
 
 
-def test_prospective_extra_required_edge_is_rejected() -> None:
-    payload = mock_generation("schelling")
-    prediction = payload["prospective_predictions"][0]
-    required = {
-        (item["source"], item["target"])
-        for item in prediction["validation_criteria"]["required_candidate_edges"]
-    }
-    extra = next(
-        item for item in payload["representation"]["candidate_edges"]
-        if (item["source"], item["target"]) not in required
-    )
-    prediction["validation_criteria"]["required_candidate_edges"].append(
-        {"source": extra["source"], "target": extra["target"]}
-    )
-    result = _generation_validation(payload)
-    assert any("exactly equal" in error for error in result["errors"])
-    non_candidate = mock_generation("schelling")
-    prediction = non_candidate["prospective_predictions"][0]
-    path_nodes = set(prediction["expected_temporal_order"])
-    unrelated = next(
-        item["id"] for item in non_candidate["representation"]["indicators"]
-        if item["id"] not in path_nodes
-    )
-    prediction["validation_criteria"]["required_candidate_edges"].append(
-        {"source": prediction["source_indicator"], "target": unrelated}
-    )
-    result = _generation_validation(non_candidate)
-    assert any("exactly equal" in error for error in result["errors"])
+def test_prospective_prediction_cannot_embed_an_alternative_edge_list() -> None:
+    payload = mock_path_generation("schelling")
+    payload["prospective_predictions"][0]["required_candidate_edges"] = []
+    with pytest.raises(Exception, match="Extra inputs are not permitted"):
+        PathGeneration.model_validate(payload)
 
 
 def _candidate_signature(candidates: list[dict[str, str]]) -> tuple[tuple[str, ...], ...]:
     return tuple(
-        sorted((item["source"], item["target"], item["branch_id"]) for item in candidates)
+        sorted((item["source"], item["target"], item["hypothesis_group_id"]) for item in candidates)
     )
 
 
-def test_cross_branch_robustness_repetitions_are_distinct_and_reproducible() -> None:
+def test_cross_group_robustness_repetitions_are_distinct_and_reproducible() -> None:
     representation = mock_generation("schelling")["representation"]
-    seed0 = stable_seed(99, "cross_branch_relation", 0)
-    seed1 = stable_seed(99, "cross_branch_relation", 1)
+    seed0 = stable_seed(99, "cross_hypothesis_group_relation", 0)
+    seed1 = stable_seed(99, "cross_hypothesis_group_relation", 1)
     first, _ = _corrupt_candidates_and_frames(
-        representation, [], "cross_branch_relation", 0.2, seed0
+        representation, [], "cross_hypothesis_group_relation", 0.2, seed0
     )
     replay, _ = _corrupt_candidates_and_frames(
-        representation, [], "cross_branch_relation", 0.2, seed0
+        representation, [], "cross_hypothesis_group_relation", 0.2, seed0
     )
     second, _ = _corrupt_candidates_and_frames(
-        representation, [], "cross_branch_relation", 0.2, seed1
+        representation, [], "cross_hypothesis_group_relation", 0.2, seed1
     )
     assert _candidate_signature(first) == _candidate_signature(replay)
     assert _candidate_signature(first) != _candidate_signature(second)
@@ -379,7 +354,7 @@ def test_cross_branch_robustness_repetitions_are_distinct_and_reproducible() -> 
         "irrelevant_indicator",
         "redundant_semantic_indicator",
         "delete_candidate_relation",
-        "wrong_branch_assignment",
+        "wrong_hypothesis_group_assignment",
     ],
 )
 def test_other_robustness_operators_use_repetition_seed(operator: str) -> None:
@@ -462,7 +437,7 @@ def test_workers_1_equals_workers_n_after_pool_refactor() -> None:
     base = {
         "frames": frames,
         "candidates": [
-            {"source": "a", "target": "b", "branch_id": "b", "expected_direction": "unknown"}
+            {"source": "a", "target": "b", "hypothesis_group_id": "macro_outcome_b", "expected_direction": "unknown"}
         ],
         "maximum_lag": 2, "parent_alpha": 0.1, "fdr_alpha": 0.05,
         "bootstrap_repetitions": 4, "support_threshold": 0.5,

@@ -52,7 +52,6 @@ def controlled_representation(scenario: str) -> dict[str, Any]:
         {
             "id": item.process_id,
             "scale": item.scale,
-            "branch_id": f"controlled_branch_{index % 4}",
             "computation": item.computation,
             "temporal_aggregation": item.temporal_aggregation,
             "parameter_associations": (
@@ -68,13 +67,21 @@ def controlled_representation(scenario: str) -> dict[str, Any]:
         }
         for index, item in enumerate(processes)
     ]
-    branch_lookup = {item["id"]: item["branch_id"] for item in indicators}
     truth = reference_relations(scenario)
+    meso_to_macro = {
+        item.source: item.target
+        for item in truth
+        if item.source.startswith(("s_meso_", "d_meso_"))
+        and item.target.startswith(("s_macro_", "d_macro_"))
+    }
     edges = [
         {
             "source": item.source,
             "target": item.target,
-            "branch_id": branch_lookup[item.source],
+            "hypothesis_group_id": "macro_outcome_" + (
+                item.target if item.target in meso_to_macro.values()
+                else meso_to_macro[item.target]
+            ),
             "expected_direction": "increase" if item.sign > 0 else "decrease",
         }
         for item in truth
@@ -89,20 +96,35 @@ def controlled_representation(scenario: str) -> dict[str, Any]:
                 {
                     "source": micro_ids[index],
                     "target": f"{prefix}_meso_{(index + 1) % 4}",
-                    "branch_id": branch_lookup[micro_ids[index]],
+                    "hypothesis_group_id": f"macro_outcome_{prefix}_macro_{(index + 1) % 4}",
                     "expected_direction": "unknown",
                 },
                 {
                     "source": f"{prefix}_meso_{index}",
                     "target": f"{prefix}_macro_{(index + 1) % 4}",
-                    "branch_id": branch_lookup[f"{prefix}_meso_{index}"],
+                    "hypothesis_group_id": f"macro_outcome_{prefix}_macro_{(index + 1) % 4}",
                     "expected_direction": "unknown",
                 },
             ]
         )
+    candidate_paths = []
+    for meso_source, macro_target in sorted(meso_to_macro.items()):
+        for relation in truth:
+            if relation.target == meso_source and relation.source.startswith(
+                ("s_micro_", "d_micro_")
+            ):
+                candidate_paths.append(
+                    {
+                        "path_id": f"controlled_{relation.source}_{meso_source}_{macro_target}",
+                        "micro_indicator": relation.source,
+                        "meso_indicator": meso_source,
+                        "macro_indicator": macro_target,
+                    }
+                )
     return {
         "scenario": scenario,
         "indicators": indicators,
+        "candidate_paths": candidate_paths,
         "candidate_edges": edges,
     }
 

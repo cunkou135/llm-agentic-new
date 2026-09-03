@@ -6,7 +6,10 @@ from pathlib import Path
 import pandas as pd
 
 from emergence_attribution.llm_client import LLMResponse
-from emergence_attribution.mock_semantic import mock_generation
+from emergence_attribution.mock_semantic import (
+    mock_indicator_generation,
+    mock_path_generation,
+)
 from emergence_attribution.pipeline import load_experiment_config
 from emergence_attribution.semantic import run_semantic_stage
 
@@ -15,10 +18,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _provider(replication_suffix: str):
-    def provider(scenario: str, generation_index: int):
-        payload = mock_generation(scenario)
-        if generation_index >= 2:
-            payload["representation"]["interpretation_boundary"] += replication_suffix
+    def provider(scenario: str, generation_index: int, phase: str):
+        payload = (
+            mock_indicator_generation(scenario)
+            if phase == "indicator"
+            else mock_path_generation(scenario)
+        )
+        if phase == "indicator" and generation_index >= 3:
+            payload["interpretation_boundary"] += replication_suffix
         text = json.dumps(payload, ensure_ascii=False)
 
         def complete(_system: str, _user: str) -> LLMResponse:
@@ -80,23 +87,22 @@ def test_replication_only_generation_cannot_change_selected_representation(
                 encoding="utf-8"
             )
         )[scenario]
-        assert validation["selected_generation"] < 2
-        assert [item["selection_eligible"] for item in validation["all_generations"]] == [
-            True,
-            True,
-            False,
+        assert validation["selected_indicator_generation"] < 3
+        assert [item["generation_role"] for item in validation["indicator_generations"]] == [
+            "selection_eligible",
+            "selection_eligible",
+            "selection_eligible",
+            "replication_only",
+            "replication_only",
+            "replication_only",
         ]
-    pairwise = pd.read_csv(first / "representation" / "replication_pairwise.csv")
-    assert len(pairwise) == 6
-    assert set(pairwise["comparison_group"]) == {
-        "within_selection",
-        "selection_vs_replication",
-    }
+    pairwise = pd.read_csv(first / "representation" / "indicator_replication_pairwise.csv")
+    assert len(pairwise) == 30
     agreement = json.loads(
-        (first / "representation" / "replication_agreement.json").read_text(
+        (first / "representation" / "representation_agreement.json").read_text(
             encoding="utf-8"
         )
     )
-    assert agreement["hidden_truth_used"] is False
-    assert "scale_assignment_jaccard" in pairwise.columns
-    assert "source_family_jaccard" in pairwise.columns
+    assert "hidden_truth_used" not in agreement
+    assert "scale_agreement" in pairwise.columns
+    assert "source_family_agreement" in pairwise.columns

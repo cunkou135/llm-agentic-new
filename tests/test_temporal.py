@@ -27,7 +27,7 @@ CANDIDATES = [
     {
         "source": "source",
         "target": "target",
-        "branch_id": "branch_0",
+        "hypothesis_group_id": "macro_outcome_target",
         "expected_direction": "increase",
     }
 ]

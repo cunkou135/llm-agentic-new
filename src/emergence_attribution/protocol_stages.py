@@ -22,8 +22,8 @@ from .final_protocol import (
 from .interventions import (
     CLASSIFICATION_COLUMNS,
     classify_edge_interventions,
-    eligible_propagation_path_ids,
     estimate_all_effects,
+    select_representative_paths,
 )
 from .primary_freeze import verify_primary_contract
 from .simulation import trajectories
@@ -119,23 +119,82 @@ def run_dose_response_analysis(
     analysis = run_root / "analysis"
     _atomic_csv(effects, analysis / "dose_response_effects.csv")
     _atomic_csv(summary, analysis / "dose_response_summary.csv")
+    path_rows: list[dict[str, Any]] = []
+    qualification_path = analysis / "path_temporal_qualification.csv"
+    path_classification_path = analysis / "path_intervention_classification.csv"
+    qualified_ids: set[tuple[str, str]] = set()
+    supported_ids: set[tuple[str, str]] = set()
+    if qualification_path.is_file():
+        qualified = pd.read_csv(qualification_path)
+        qualified_ids = {
+            (str(row.scenario), str(row.path_id))
+            for row in qualified.itertuples(index=False)
+            if bool(row.path_temporally_qualified)
+        }
+    if path_classification_path.is_file():
+        primary = pd.read_csv(path_classification_path)
+        supported_ids = {
+            (str(row.scenario), str(row.path_id))
+            for row in primary.itertuples(index=False)
+            if str(row.path_classification) == "supported"
+        }
+    summary_lookup = {
+        (str(row.scenario), str(row.parameter), str(row.node_id)): row
+        for row in summary.itertuples(index=False)
+    }
+    for scenario, representation in sorted(representations.items()):
+        for path in representation.get("candidate_paths", []):
+            key = (scenario, str(path["path_id"]))
+            if key not in qualified_ids and key not in supported_ids:
+                continue
+            nodes = [
+                str(path["micro_indicator"]), str(path["meso_indicator"]),
+                str(path["macro_indicator"]),
+            ]
+            trends = [
+                summary_lookup.get((scenario, str(path["parameter"]), node))
+                for node in nodes
+            ]
+            path_rows.append(
+                {
+                    "scenario": scenario,
+                    "path_id": str(path["path_id"]),
+                    "parameter": str(path["parameter"]),
+                    "temporally_qualified": key in qualified_ids,
+                    "primary_supported": key in supported_ids,
+                    "micro_dose_trend": getattr(trends[0], "dose_response_slope", np.nan),
+                    "meso_dose_trend": getattr(trends[1], "dose_response_slope", np.nan),
+                    "macro_dose_trend": getattr(trends[2], "dose_response_slope", np.nan),
+                    "primary_classification_changed": False,
+                }
+            )
+    path_dose = pd.DataFrame(
+        path_rows,
+        columns=[
+            "scenario", "path_id", "parameter", "temporally_qualified",
+            "primary_supported", "micro_dose_trend", "meso_dose_trend",
+            "macro_dose_trend", "primary_classification_changed",
+        ],
+    )
+    _atomic_csv(path_dose, analysis / "path_dose_response_summary.csv")
     return {
         "evaluation_track": "secondary_dose_response",
         "effect_rows": len(effects),
         "summary_rows": len(summary),
+        "path_summary_rows": len(path_dose),
         "primary_classification_changed": False,
     }
 
 
 def _validated_primary_paths(run_root: Path) -> pd.DataFrame:
-    timing = pd.read_csv(run_root / "analysis" / "path_timing_summary.csv")
-    classifications = pd.read_csv(
-        run_root / "analysis" / "intervention_classifications.csv"
+    paths = pd.read_csv(
+        run_root / "analysis" / "path_intervention_classification.csv"
     )
-    if timing.empty:
-        return timing
-    identifiers = eligible_propagation_path_ids(timing, classifications)
-    return timing[timing["path_id"].astype(str).isin(identifiers)].copy()
+    supported = paths[
+        paths["path_classification"].astype(str) == "supported"
+    ].copy()
+    supported["source"] = supported["micro"]
+    return supported
 
 
 def _attach_holdout_mechanism_metrics(
@@ -234,7 +293,7 @@ def run_holdout_confirmation_analysis(
         )
     )
     prospective_confirmation = holdout_prospective_confirmation(
-        frozen_predictions, primary_graphs, effects
+        frozen_predictions, primary_graphs, effects, representations
     )
     primary_classifications = pd.read_csv(
         run_root / "analysis" / "intervention_classifications.csv"
@@ -263,6 +322,58 @@ def run_holdout_confirmation_analysis(
         mechanism_confirmation,
         analysis / "holdout_mechanism_confirmation.csv",
     )
+    primary_paths = pd.read_csv(
+        analysis / "path_intervention_classification.csv"
+    )
+    representative = select_representative_paths(primary_paths, path_confirmation)
+    (analysis / "representative_path_selection.json").write_text(
+        json.dumps(representative, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    temporal_paths = pd.read_csv(analysis / "path_temporal_qualification.csv")
+    prospective_primary = pd.read_csv(analysis / "prospective_validation.csv")
+    funnel_rows: list[dict[str, Any]] = []
+    for scenario, representation in sorted(representations.items()):
+        candidate_count = len(representation.get("candidate_paths", []))
+        temporal_subset = temporal_paths[
+            temporal_paths["scenario"].astype(str) == scenario
+        ]
+        primary_subset = primary_paths[
+            primary_paths["scenario"].astype(str) == scenario
+        ]
+        holdout_subset = path_confirmation[
+            path_confirmation["scenario"].astype(str) == scenario
+        ]
+        prospective_subset = prospective_primary[
+            prospective_primary["scenario"].astype(str) == scenario
+        ]
+        temporal_count = int(
+            temporal_subset["path_temporally_qualified"].astype(bool).sum()
+        )
+        supported_count = int(
+            (primary_subset["path_classification"].astype(str) == "supported").sum()
+        )
+        holdout_count = int(
+            holdout_subset.get(
+                "holdout_confirmed", pd.Series(False, index=holdout_subset.index)
+            ).astype(bool).sum()
+        )
+        funnel_rows.append(
+            {
+                "scenario": scenario,
+                "candidate_path_count": candidate_count,
+                "temporally_qualified_path_count": temporal_count,
+                "temporally_qualified_path_rate": temporal_count / max(candidate_count, 1),
+                "intervention_supported_path_count": supported_count,
+                "intervention_supported_path_rate": supported_count / max(candidate_count, 1),
+                "contradicted_path_count": int((primary_subset["path_classification"] == "contradicted").sum()),
+                "inconclusive_path_count": int((primary_subset["path_classification"] == "inconclusive").sum()),
+                "manipulation_failure_path_count": int((primary_subset["path_classification"] == "manipulation_failure").sum()),
+                "holdout_confirmed_path_count": holdout_count,
+                "holdout_confirmation_rate": holdout_count / max(supported_count, 1),
+                "prospective_supported_path_count": int((prospective_subset["classification"] == "supported").sum()),
+            }
+        )
+    _atomic_csv(pd.DataFrame(funnel_rows), analysis / "path_funnel_summary.csv")
     verify_primary_contract(run_root)
     return {
         "evaluation_track": "holdout_confirmation",
@@ -384,10 +495,21 @@ def run_falsification_analyses(
     )
     analysis = run_root / "analysis"
     _atomic_csv(negative, analysis / "temporal_negative_control.csv")
+    _atomic_csv(
+        negative[
+            [
+                "evaluation_track", "scenario", "repetition",
+                "candidate_path_count", "qualified_path_count",
+                "path_qualification_rate", "control_only",
+            ]
+        ],
+        analysis / "path_temporal_negative_control.csv",
+    )
     _atomic_csv(attenuation, analysis / "path_mechanism_attenuation.csv")
     return {
         "evaluation_track": "falsification_control",
         "negative_control_rows": len(negative),
+        "path_negative_control_rows": len(negative),
         "path_attenuation_rows": len(attenuation),
         "primary_data_overwritten": False,
         "hidden_truth_used_for_path_attenuation": False,

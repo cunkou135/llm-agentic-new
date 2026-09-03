@@ -171,7 +171,6 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                 "scientific_definition": definition,
                 "phenomenon": "fixed observable comparator",
                 "scale": "micro",
-                "branch_id": f"branch_{index // 4}",
                 "entity_scope": entity_scope,
                 "entities": "individual agent interactions, events, or local primitive states",
                 "source_fields": sorted(expression_fields(expression)),
@@ -191,7 +190,6 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                 "scientific_definition": definition,
                 "phenomenon": "fixed observable comparator",
                 "scale": "meso",
-                "branch_id": f"branch_{index // 2}",
                 "entity_scope": entity_scope,
                 "entities": "public district, network-neighborhood, or community organization",
                 "source_fields": sorted(expression_fields(expression)),
@@ -211,7 +209,6 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                 "scientific_definition": definition,
                 "phenomenon": "fixed observable comparator",
                 "scale": "macro",
-                "branch_id": f"branch_{index}",
                 "entity_scope": "whole_system",
                 "entities": "public system-level simulator summary",
                 "source_fields": sorted(expression_fields(expression)),
@@ -222,17 +219,18 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
             }
         )
     edges: list[dict[str, Any]] = []
-    for branch in range(4):
-        micro_ids = [f"{prefix}_micro_{index:02d}" for index in range(branch * 4, branch * 4 + 4)]
-        meso_ids = [f"{prefix}_meso_{branch * 2:02d}", f"{prefix}_meso_{branch * 2 + 1:02d}"]
-        macro_id = f"{prefix}_macro_{branch:02d}"
+    for macro_index in range(4):
+        micro_ids = [f"{prefix}_micro_{index:02d}" for index in range(macro_index * 4, macro_index * 4 + 4)]
+        meso_ids = [f"{prefix}_meso_{macro_index * 2:02d}", f"{prefix}_meso_{macro_index * 2 + 1:02d}"]
+        macro_id = f"{prefix}_macro_{macro_index:02d}"
         for index, micro_id in enumerate(micro_ids):
             edges.append(
                 {
                     "source": micro_id,
                     "target": meso_ids[index // 2],
                     "expected_direction": "unknown",
-                    "rationale": "Fixed adjacent-scale comparator relation defined before evaluation.",
+                    "hypothesis_group_ids": [f"macro_outcome_{macro_id}"],
+                    "path_ids": [f"fixed_{micro_id}_{meso_ids[index // 2]}_{macro_id}"],
                 }
             )
         for meso_id in meso_ids:
@@ -241,7 +239,8 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                     "source": meso_id,
                     "target": macro_id,
                     "expected_direction": "unknown",
-                    "rationale": "Fixed adjacent-scale comparator relation defined before evaluation.",
+                    "hypothesis_group_ids": [f"macro_outcome_{macro_id}"],
+                    "path_ids": [f"fixed_{meso_id}_{macro_id}"],
                 }
             )
         edges.append(
@@ -249,7 +248,8 @@ def predefined_representation(scenario: str) -> dict[str, Any]:
                 "source": micro_ids[0],
                 "target": meso_ids[1],
                 "expected_direction": "unknown",
-                "rationale": "Fixed adjacent-scale comparator relation defined before evaluation.",
+                "hypothesis_group_ids": [f"macro_outcome_{macro_id}"],
+                "path_ids": [f"fixed_{micro_ids[0]}_{meso_ids[1]}_{macro_id}"],
             }
         )
     return {

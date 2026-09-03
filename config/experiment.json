@@ -1,9 +1,9 @@
 {
-  "schema_version": "3.0-final-confirmatory-protocol",
+  "schema_version": "4.0-two-phase-path-centered-confirmatory-protocol",
   "master_seed": 20260901,
   "formal_run": true,
-  "random_seeds": [1101, 1102, 1103, 1104, 1105, 1106, 1107, 1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1117, 1118, 1119, 1120, 1121, 1122, 1123, 1124],
-  "confirmation_seeds": [2101, 2102, 2103, 2104, 2105, 2106, 2107, 2108, 2109, 2110, 2111, 2112],
+  "random_seeds": [3101, 3102, 3103, 3104, 3105, 3106, 3107, 3108, 3109, 3110, 3111, 3112, 3113, 3114, 3115, 3116, 3117, 3118, 3119, 3120, 3121, 3122, 3123, 3124],
+  "confirmation_seeds": [4101, 4102, 4103, 4104, 4105, 4106, 4107, 4108, 4109, 4110, 4111, 4112],
   "dose_response": {
     "enabled": true,
     "levels": ["minus", "mid_minus", "baseline", "mid_plus", "plus"],
@@ -12,6 +12,10 @@
   "semantic_replication": {
     "selection_generations": 3,
     "replication_only_generations": 3
+  },
+  "path_replication": {
+    "primary_generations": 1,
+    "replication_only_generations": 2
   },
   "temporal_negative_control": {
     "enabled": true,
@@ -22,11 +26,13 @@
   "representation": {
     "independent_generations": 3,
     "maximum_repair_rounds": 3,
-    "required_branch_count": 4,
     "budget": {"micro": 16, "meso": 8, "macro": 4},
-    "minimum_candidate_edges": 28,
-    "maximum_candidate_edges": 48,
-    "selection_rule": "validity_then_source_field_diversity_then_branch_completeness_then_fewer_repairs_then_canonical_hash",
+    "minimum_candidate_paths": 16,
+    "maximum_candidate_paths": 24,
+    "prospective_prediction_count": 6,
+    "minimum_paths_per_parameter": 4,
+    "minimum_paths_per_macro": 2,
+    "selection_rule": "validity_then_source_field_diversity_then_parameter_micro_coverage_then_meso_structural_diversity_then_macro_concept_diversity_then_fewer_repairs_then_canonical_hash",
     "require_all_parameters_associated": true
   },
   "temporal": {

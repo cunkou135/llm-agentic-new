@@ -21,12 +21,18 @@ from rich.progress import (
 
 class ProgressReporter:
     STAGES = [
-        "semantic",
+        "indicator_generation",
+        "indicator_freeze",
+        "path_generation",
+        "semantic_freeze",
         "baseline_simulation",
         "temporal",
+        "path_temporal_qualification",
         "intervention_simulation",
         "intervention",
+        "path_intervention_classification",
         "prospective",
+        "primary_freeze",
         "dose_response",
         "holdout_simulation",
         "holdout_confirmation",

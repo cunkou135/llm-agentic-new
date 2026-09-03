@@ -17,7 +17,6 @@ import pandas as pd
 from .provenance import sha256_file
 from .temporal import load_graph_records
 from .controlled import controlled_representation
-from .interventions import eligible_propagation_path_ids
 
 
 COLOURS = {
@@ -134,7 +133,7 @@ def _graph_positions(representation: dict[str, Any]) -> dict[str, tuple[float, f
     positions = {}
     for scale in ("micro", "meso", "macro"):
         nodes = [item for item in representation["indicators"] if item["scale"] == scale]
-        for index, node in enumerate(sorted(nodes, key=lambda item: (item["branch_id"], item["id"]))):
+        for index, node in enumerate(sorted(nodes, key=lambda item: item["id"])):
             positions[node["id"]] = (scale_x[scale], -index)
     return positions
 
@@ -303,10 +302,14 @@ def figure_6(run_root: Path, output_root: Path, formats: list[str], config: dict
 
 def figure_7(run_root: Path, output_root: Path, formats: list[str], config: dict[str, Any]) -> list[Path]:
     timing = pd.read_csv(run_root / "analysis" / "path_timing_summary.csv")
-    classifications = pd.read_csv(
-        run_root / "analysis" / "intervention_classifications.csv"
+    path_classification = pd.read_csv(
+        run_root / "analysis" / "path_intervention_classification.csv"
     )
-    eligible_ids = eligible_propagation_path_ids(timing, classifications)
+    eligible_ids = set(
+        path_classification[
+            path_classification["path_classification"].astype(str) == "supported"
+        ]["path_id"].astype(str)
+    )
     scenarios = list(config.get("scenario_order", sorted(timing["scenario"].unique())))
     figure, axes = plt.subplots(
         max(len(scenarios), 1), 1, figsize=(7.2, 4.6), squeeze=False,

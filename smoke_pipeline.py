@@ -51,7 +51,7 @@ def main() -> int:
         {
             "source": "x_mean",
             "target": "y",
-            "branch_id": "toy_branch",
+            "hypothesis_group_id": "toy_macro_outcome",
             "expected_direction": "increase",
         }
     ]
@@ -107,4 +107,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

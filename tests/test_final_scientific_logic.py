@@ -26,7 +26,7 @@ from emergence_attribution.interventions import (
     intervention_testable_edges,
 )
 from emergence_attribution.llm_client import LLMResponse
-from emergence_attribution.mock_semantic import mock_generation
+from emergence_attribution.mock_semantic import mock_generation, mock_indicator_generation
 from emergence_attribution.pipeline import load_experiment_config
 from emergence_attribution.prospective import classify_prediction_requirements
 from emergence_attribution.reference_truth import reference_relations
@@ -42,18 +42,28 @@ def _path_representation() -> dict:
         "scenario": "toy",
         "indicators": [
             {
-                "id": "micro_a", "scale": "micro", "branch_id": "branch_a",
+                "id": "micro_a", "scale": "micro",
                 "parameter_associations": [{
                     "parameter": "theta", "relationship": "direct",
                     "expected_indicator_direction": "increase", "rationale": "rule",
                 }],
             },
-            {"id": "meso_b", "scale": "meso", "branch_id": "branch_a", "parameter_associations": []},
-            {"id": "macro_c", "scale": "macro", "branch_id": "branch_a", "parameter_associations": []},
+            {"id": "meso_b", "scale": "meso", "parameter_associations": []},
+            {"id": "macro_c", "scale": "macro", "parameter_associations": []},
         ],
+        "candidate_paths": [{
+            "path_id": "path_toy_01", "parameter": "theta",
+            "intervention_direction": "plus", "micro_indicator": "micro_a",
+            "meso_indicator": "meso_b", "macro_indicator": "macro_c",
+            "micro_to_meso_expected_direction": "increase",
+            "meso_to_macro_expected_direction": "increase",
+            "expected_micro_response": "increase",
+            "expected_meso_response": "increase",
+            "expected_macro_response": "increase",
+        }],
         "candidate_edges": [
-            {"source": "micro_a", "target": "meso_b", "branch_id": "branch_a", "expected_direction": "increase"},
-            {"source": "meso_b", "target": "macro_c", "branch_id": "branch_a", "expected_direction": "increase"},
+            {"source": "micro_a", "target": "meso_b", "hypothesis_group_ids": ["macro_outcome_macro_c"], "expected_direction": "increase"},
+            {"source": "meso_b", "target": "macro_c", "hypothesis_group_ids": ["macro_outcome_macro_c"], "expected_direction": "increase"},
         ],
     }
 
@@ -62,7 +72,8 @@ def _edge(source: str, target: str, lag: int = 1) -> TemporalEdge:
     return TemporalEdge(
         source=source, target=target, lag=lag, beta=0.7, p_value=0.001,
         q_value=0.002, effect_direction="increase", support=0.9,
-        lag_support=0.8, lag_std=0.1, branch_id="branch_a",
+        lag_support=0.8, lag_std=0.1,
+        hypothesis_group_id="macro_outcome_macro_c",
     )
 
 
@@ -153,8 +164,9 @@ def test_unrestricted_candidate_denominator_is_actual_search_space() -> None:
     representation = mock_generation("schelling")["representation"]
     assert len(representation["indicators"]) == 28
     assert candidate_count_for_method("unrestricted_temporal_search", representation) == 28 * 27
-    assert candidate_count_for_method("full_method", representation) == len(
-        representation["candidate_edges"]
+    assert candidate_count_for_method("full_method", representation) == sum(
+        len(edge["hypothesis_group_ids"])
+        for edge in representation["candidate_edges"]
     )
 
 
@@ -214,6 +226,12 @@ def test_primary_attribution_contains_only_full_method(tmp_path: Path) -> None:
         {"scenario": "schelling", "method": "full_method", "source": edge.source, "target": edge.target, "primary_class": "supported"},
         {"scenario": "schelling", "method": "trajectory_vote", "source": edge.source, "target": edge.target, "primary_class": "directionally_contradicted"},
     ]).to_csv(analysis / "intervention_classifications.csv", index=False)
+    pd.DataFrame(columns=["scenario", "path_id"]).to_csv(
+        analysis / "path_temporal_qualification.csv", index=False
+    )
+    pd.DataFrame(columns=["scenario", "path_id", "path_classification"]).to_csv(
+        analysis / "path_intervention_classification.csv", index=False
+    )
     result = integrate_evidence(tmp_path, {"schelling": representation})
     evidence = [
         item for relation in result["scenarios"]["schelling"]["relations"]
@@ -263,19 +281,20 @@ def test_semantic_proposal_has_no_temporal_qualification_rate(
     assert qualified["temporal_metric_reason"] == "temporally_qualified"
 
 
-def test_controlled_fdr_is_branch_local() -> None:
+def test_controlled_fdr_is_macro_outcome_group_local() -> None:
     for scenario in ("schelling", "deffuant"):
-        branches = {
-            edge["branch_id"]
+        groups = {
+            edge["hypothesis_group_id"]
             for edge in controlled_representation(scenario)["candidate_edges"]
         }
-        assert branches == {f"controlled_branch_{index}" for index in range(4)}
+        prefix = "s" if scenario == "schelling" else "d"
+        assert groups == {f"macro_outcome_{prefix}_macro_{index}" for index in range(4)}
 
 
-def test_controlled_recovery_uses_multiple_fdr_branches() -> None:
+def test_controlled_recovery_uses_multiple_macro_outcome_groups() -> None:
     representation = controlled_representation("schelling")
-    assert len({item["branch_id"] for item in representation["indicators"]}) == 4
-    assert len({edge["branch_id"] for edge in representation["candidate_edges"]}) == 4
+    assert all("hypothesis_group_id" in edge for edge in representation["candidate_edges"])
+    assert len({edge["hypothesis_group_id"] for edge in representation["candidate_edges"]}) == 4
 
 
 def test_controlled_unmanipulable_truth_is_not_eligible() -> None:
@@ -301,7 +320,7 @@ def test_semantic_generation_resume_does_not_repeat_completed_api_calls(
             if fail:
                 raise RuntimeError("simulated provider outage")
             return LLMResponse(
-                json.dumps(mock_generation("schelling")), 0, 0, "resume-test"
+                json.dumps(mock_indicator_generation("schelling")), 0, 0, "resume-test"
             )
 
         return complete

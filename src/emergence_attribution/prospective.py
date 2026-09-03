@@ -89,67 +89,49 @@ def validate_prospective_predictions(
     if actual_hash != expected_hash:
         raise RuntimeError("frozen prospective prediction hash mismatch")
     predictions = json.loads(prediction_path.read_text(encoding="utf-8"))["scenarios"]
-    effects = pd.read_parquet(run_root / "analysis" / "paired_effects.parquet")
-    graphs = load_graph_records(run_root / "analysis" / "main_graphs.jsonl")
+    path_results = pd.read_csv(
+        run_root / "analysis" / "path_intervention_classification.csv"
+    )
     rows: list[dict[str, Any]] = []
     for scenario, scenario_predictions in sorted(predictions.items()):
-        graph_pairs = {
-            (edge.source, edge.target)
-            for edge in graphs[(scenario, "full_method")]
+        frozen_paths = {
+            str(path["path_id"]): path
+            for path in representations[scenario]["candidate_paths"]
         }
         for prediction in scenario_predictions:
-            criteria = prediction["validation_criteria"]
-            expected_edges = [
-                (item["source"], item["target"])
-                for item in criteria["required_candidate_edges"]
-            ]
-            observational_edges_retained = [pair in graph_pairs for pair in expected_edges]
-            indicators = [prediction["source_indicator"], *prediction["downstream_indicators"]]
-            expected_directions = [
-                prediction["expected_source_direction"],
-                *prediction["expected_downstream_direction"],
-            ]
-            selected = effects[
-                (effects["scenario"] == scenario)
-                & (effects["parameter"] == prediction["parameter"])
-                & (effects["direction"] == prediction["intervention_direction"])
-                & (effects["node_id"].isin(indicators))
-            ]
-            lookup = {row.node_id: row for row in selected.itertuples()}
-            source = lookup.get(prediction["source_indicator"])
-            source_required = bool(criteria["required_source_response"])
-            downstream_required = list(criteria["required_downstream_response"])
-            order_required = bool(criteria["required_temporal_order"])
-            classification, direction_matches, onset_order_supported, downstream_supported = (
-                classify_prediction_requirements(
-                    source,
-                    [lookup.get(indicator) for indicator in prediction["downstream_indicators"]],
-                    expected_directions,
-                    downstream_required,
-                    source_required=source_required,
-                    order_required=order_required,
-                    observational_edges_retained=observational_edges_retained,
+            path_id = str(prediction["candidate_path_id"])
+            if path_id not in frozen_paths:
+                raise RuntimeError(
+                    f"prospective prediction references non-frozen path {path_id}"
                 )
-            )
+            selected = path_results[
+                (path_results["scenario"].astype(str) == scenario)
+                & (path_results["path_id"].astype(str) == path_id)
+            ]
+            if len(selected) != 1:
+                raise RuntimeError(
+                    f"prospective path classification is not unique: {scenario}:{path_id}"
+                )
+            result = selected.iloc[0]
+            path = frozen_paths[path_id]
+            classification = str(result["path_classification"])
             rows.append(
                 {
                     "evaluation_track": "primary_discovery",
                     "scenario": scenario,
                     "prediction_id": prediction["prediction_id"],
-                    "phenomenon": prediction["phenomenon"],
-                    "parameter": prediction["parameter"],
-                    "intervention_direction": prediction["intervention_direction"],
-                    "source_indicator": prediction["source_indicator"],
-                    "downstream_indicators": json.dumps(
-                        prediction["downstream_indicators"], ensure_ascii=False
-                    ),
+                    "candidate_path_id": path_id,
+                    "parameter": path["parameter"],
+                    "intervention_direction": path["intervention_direction"],
+                    "micro": path["micro_indicator"],
+                    "meso": path["meso_indicator"],
+                    "macro": path["macro_indicator"],
                     "classification": classification,
-                    "observational_edges_retained": json.dumps(
-                        observational_edges_retained
+                    "path_temporally_qualified": bool(
+                        result["path_temporally_qualified"]
                     ),
-                    "direction_matches": json.dumps(direction_matches),
-                    "onset_order_supported": onset_order_supported,
-                    "required_downstream_responses_supported": downstream_supported,
+                    "direction_supported": bool(result["direction_supported"]),
+                    "onset_order_supported": bool(result["onset_order_supported"]),
                     "falsification_condition": prediction["falsification_condition"],
                     "prediction_sha256": hashlib.sha256(
                         json.dumps(

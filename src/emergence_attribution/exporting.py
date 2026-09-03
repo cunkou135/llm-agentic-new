@@ -25,6 +25,9 @@ CORE_ANALYSIS_FILES = [
     "effect_curves.parquet",
     "paired_effects.parquet",
     "path_timing_summary.csv",
+    "path_temporal_qualification.csv",
+    "path_intervention_classification.csv",
+    "path_funnel_summary.csv",
     "representative_path_selection.json",
     "intervention_classifications.csv",
     "edge_intervention_classifications.csv",
@@ -37,10 +40,12 @@ CORE_ANALYSIS_FILES = [
     "prospective_validation.csv",
     "dose_response_effects.csv",
     "dose_response_summary.csv",
+    "path_dose_response_summary.csv",
     "holdout_path_confirmation.csv",
     "holdout_prospective_confirmation.csv",
     "holdout_mechanism_confirmation.csv",
     "temporal_negative_control.csv",
+    "path_temporal_negative_control.csv",
     "path_mechanism_attenuation.csv",
 ]
 
@@ -64,6 +69,12 @@ def integrate_evidence(
         run_root / "analysis" / "comparative_method_intervention_evidence.csv",
         index=False,
     )
+    path_temporal = pd.read_csv(
+        run_root / "analysis" / "path_temporal_qualification.csv"
+    )
+    path_intervention = pd.read_csv(
+        run_root / "analysis" / "path_intervention_classification.csv"
+    )
     result: dict[str, Any] = {
         "schema_version": "1.0",
         "interpretation": "semantic hypotheses, temporal evidence, and intervention evidence remain distinct",
@@ -78,20 +89,24 @@ def integrate_evidence(
             orient="records"
         ):
             intervention_lookup.setdefault((row["source"], row["target"]), []).append(row)
-        retained = {(edge.source, edge.target): edge for edge in graph}
+        retained: dict[tuple[str, str], list[Any]] = {}
+        for edge in graph:
+            retained.setdefault((edge.source, edge.target), []).append(edge)
         relations = []
         for semantic in representation["candidate_edges"]:
             pair = (semantic["source"], semantic["target"])
-            temporal = retained.get(pair)
             relations.append(
                 {
                     "source": semantic["source"],
                     "target": semantic["target"],
                     "semantic_hypothesis": {
                         "expected_direction": semantic["expected_direction"],
-                        "rationale": semantic["rationale"],
+                        "hypothesis_group_ids": semantic["hypothesis_group_ids"],
+                        "candidate_path_ids": semantic["path_ids"],
                     },
-                    "temporal_evidence": asdict(temporal) if temporal else None,
+                    "temporal_evidence": [
+                        asdict(edge) for edge in retained.get(pair, [])
+                    ],
                     "intervention_evidence": intervention_lookup.get(pair, []),
                 }
             )
@@ -99,6 +114,13 @@ def integrate_evidence(
             "phenomenon": representation["phenomenon"],
             "representation": representation,
             "relations": relations,
+            "candidate_paths": representation.get("candidate_paths", []),
+            "path_temporal_qualification": path_temporal[
+                path_temporal["scenario"].astype(str) == scenario
+            ].to_dict(orient="records"),
+            "path_intervention_classification": path_intervention[
+                path_intervention["scenario"].astype(str) == scenario
+            ].to_dict(orient="records"),
         }
     path = run_root / "analysis" / "attribution_objects.json"
     path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -129,10 +151,15 @@ def generate_tables(run_root: Path) -> list[Path]:
     secondary_sources = {
         "dose_response_effects.csv": "dose_response_effects_source.csv",
         "dose_response_summary.csv": "dose_response_summary_source.csv",
+        "path_dose_response_summary.csv": "path_dose_response_summary_source.csv",
         "holdout_path_confirmation.csv": "holdout_path_confirmation_source.csv",
         "holdout_prospective_confirmation.csv": "holdout_prospective_confirmation_source.csv",
         "holdout_mechanism_confirmation.csv": "holdout_mechanism_confirmation_source.csv",
         "temporal_negative_control.csv": "temporal_negative_control_source.csv",
+        "path_temporal_negative_control.csv": "path_temporal_negative_control_source.csv",
+        "path_temporal_qualification.csv": "path_temporal_qualification_source.csv",
+        "path_intervention_classification.csv": "path_intervention_classification_source.csv",
+        "path_funnel_summary.csv": "path_funnel_summary_source.csv",
         "path_mechanism_attenuation.csv": "path_mechanism_attenuation_source.csv",
     }
     for source_name, table_name in secondary_sources.items():
@@ -142,7 +169,7 @@ def generate_tables(run_root: Path) -> list[Path]:
             destination = table_root / table_name
             frame.to_csv(destination, index=False)
             outputs.append(destination)
-    replication_pairwise = run_root / "representation" / "replication_pairwise.csv"
+    replication_pairwise = run_root / "representation" / "indicator_replication_pairwise.csv"
     if replication_pairwise.exists():
         destination = table_root / "semantic_replication_pairwise_source.csv"
         pd.read_csv(replication_pairwise).to_csv(destination, index=False)

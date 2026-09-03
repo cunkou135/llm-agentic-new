@@ -31,7 +31,6 @@ def _valid_toy_generation() -> dict:
             "scientific_definition": "A sufficiently detailed deterministic toy definition.",
             "phenomenon": "toy organisation",
             "scale": scale,
-            "branch_id": "branch_0",
             "entity_scope": {
                 "micro": "individual",
                 "meso": "local_domain",
@@ -92,37 +91,40 @@ def _valid_toy_generation() -> dict:
                     "source": "toy_micro",
                     "target": "toy_meso",
                     "expected_direction": "increase",
-                    "rationale": "Toy lower-level variation can precede intermediate organisation.",
+                    "hypothesis_group_ids": ["macro_outcome_toy_macro"],
+                    "path_ids": ["toy_path"],
                 },
                 {
                     "source": "toy_meso",
                     "target": "toy_macro",
                     "expected_direction": "increase",
-                    "rationale": "Toy intermediate organisation can precede the aggregate.",
+                    "hypothesis_group_ids": ["macro_outcome_toy_macro"],
+                    "path_ids": ["toy_path"],
                 },
             ],
+            "candidate_paths": [{
+                "path_id": "toy_path",
+                "parameter": "strength",
+                "intervention_direction": "plus",
+                "micro_indicator": "toy_micro",
+                "meso_indicator": "toy_meso",
+                "macro_indicator": "toy_macro",
+                "micro_to_meso_expected_direction": "increase",
+                "meso_to_macro_expected_direction": "increase",
+                "expected_micro_response": "increase",
+                "expected_meso_response": "increase",
+                "expected_macro_response": "increase",
+                "scientific_rationale": "The path is a complete frozen toy hypothesis.",
+                "mechanistic_explanation": "The parameter changes Micro then Meso then Macro state.",
+                "falsification_condition": "Either adjacent relation or its order is unsupported.",
+            }],
             "interpretation_boundary": "Temporal qualification and intervention evidence are evaluated later and separately.",
         },
         "prospective_predictions": [
             {
                 "prediction_id": "toy_prediction",
-                "phenomenon": "toy organisation",
-                "parameter": "strength",
-                "intervention_direction": "plus",
-                "source_indicator": "toy_micro",
-                "expected_source_direction": "increase",
-                "downstream_indicators": ["toy_meso", "toy_macro"],
-                "expected_downstream_direction": ["increase", "increase"],
-                "expected_temporal_order": ["toy_micro", "toy_meso", "toy_macro"],
-                "validation_criteria": {
-                    "required_source_response": True,
-                    "required_downstream_response": [True, True],
-                    "required_temporal_order": True,
-                    "required_candidate_edges": [
-                        {"source": "toy_micro", "target": "toy_meso"},
-                        {"source": "toy_meso", "target": "toy_macro"}
-                    ]
-                },
+                "candidate_path_id": "toy_path",
+                "prospective_priority": 0,
                 "scientific_rationale": "The toy prediction exercises prospective validation wiring.",
                 "falsification_condition": "The source is changed but downstream direction or order fails.",
             }
@@ -138,10 +140,12 @@ def test_structured_schema_accepts_complete_generation() -> None:
         {"interventions": {"strength": [0.0, 1.0, 2.0]}},
         {
             "budget": {"micro": 1, "meso": 1, "macro": 1},
-            "required_branch_count": 1,
             "require_all_parameters_associated": True,
-            "minimum_candidate_edges": 2,
-            "maximum_candidate_edges": 2,
+            "minimum_candidate_paths": 1,
+            "maximum_candidate_paths": 1,
+            "minimum_paths_per_parameter": 1,
+            "minimum_paths_per_macro": 1,
+            "prospective_prediction_count": 1,
         },
     )
     assert validation["valid"], validation["errors"]
@@ -181,7 +185,7 @@ def test_prompt_contains_no_evaluation_leakage() -> None:
     )
     combined = (system + user).lower()
     forbidden = [
-        "reference_" + "branch",
+        "reference_" + "process",
         "truth_" + "lag",
         "edge_" + "f1",
         "baseline_" + "numerical_summary",

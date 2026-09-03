@@ -1,36 +1,51 @@
-# Reproducible multiscale emergence attribution experiments
+# Path-centered multiscale emergence attribution
 
-This is the existing, self-contained scientific experiment implementation. It starts from simulator rules and public raw logs, freezes executable multiscale semantic hypotheses and prospective predictions before simulation, qualifies proposed temporal relations over repeated trajectories, tests propagation with matched-seed parameter interventions, and exports paper-data artifacts and Figure 2--8 inputs.
+This repository implements the frozen confirmatory protocol for Schelling and
+Deffuant simulations. The scientific object is a complete, prospectively
+specified `parameter -> Micro -> Meso -> Macro` mechanism path. Candidate
+relations are deterministic adjacent-scale projections of those paths; they
+are not independently proposed discoveries.
 
-The project keeps three evidence types separate:
+The evidence boundary is explicit:
 
-- semantic hypotheses proposed before quantitative analysis;
-- temporal evidence from repeated baseline trajectories;
-- intervention evidence from actual simulator parameter changes.
+1. An LLM constructs executable Micro, Meso, and Macro observables using only
+   public simulator semantics and the public raw-log schema.
+2. The selected 16/8/4 observable set is frozen. A separate LLM call may only
+   combine its exact IDs into 16--24 complete testable paths per scenario.
+3. Natural trajectories temporally qualify a frozen path only when both of its
+   adjacent relations pass the unchanged Stage 2 procedure.
+4. Matched-seed simulator-parameter interventions classify the same frozen
+   path as `supported`, `contradicted`, `inconclusive`, or
+   `manipulation_failure`.
 
-A temporally qualified relation is not labelled as an unrestricted causal relation.
+No LLM call sees baseline values, temporal results, intervention results,
+Controlled Recovery truth, hidden channels, or earlier experiment outcomes.
+The program never attempts fuzzy semantic matching between different
+observables.
 
-This checkout implements the pre-formal scale-protocol revision. Schelling now
-exposes fixed spatial-district membership as a public primitive, and Deffuant
-uses a time-varying adaptive interaction network. Stage 1 must declare a typed
-scientific entity scope: Micro means an individual/interaction/elementary
-process, Meso requires an actual district/neighborhood/community/local-domain
-operation, and Macro means the whole system. Temporal smoothing, differencing,
-or constant rescaling alone cannot justify a cross-scale candidate edge.
+## Frozen protocol
 
-The 16 Micro / 8 Meso / 4 Macro, four-branch, 28--48-edge budget is a frozen
-representation capacity control for this experiment, not a theoretical claim
-that every use of the method requires those counts.
+- Indicator capacity: 16 Micro, 8 Meso, and 4 Macro per scenario.
+- Indicator calls: 3 selection-eligible plus 3 replication-only calls.
+- Path calls: 1 primary plus 2 replication-only calls over the same frozen IDs.
+- Path capacity: 16--24; at least 4 paths per controllable parameter and at
+  least 2 paths per Macro endpoint; duplicate triples are rejected.
+- Prospective predictions: 6 per scenario, each bound to a frozen
+  `candidate_path_id` before baseline simulation.
+- FDR families: pre-data Macro-outcome hypothesis groups. A shared fitted
+  relation can receive a separate q-value in every group in which it occurs.
+- Primary seeds: 3101--3124. Independent holdout seeds: 4101--4112.
+- Formal workload: 864 simulator trajectories. The structural upgrade expands
+  hypotheses, not simulator runs.
 
-Stage 3 changes simulator parameters only.  Direct Micro->Meso evidence uses
-`parameter -> Micro -> Meso`; Meso->Macro evidence reuses the same upstream
-Micro manipulation root and is labelled `upstream_mediated`.  Generated Micro,
-Meso, and Macro indicators are observed from the matched-seed trajectories and
-are never directly edited.
+The simulator core, Stage 2 lagged OLS, lag 1--5, parent alpha 0.10, FDR alpha
+0.05, 100 trajectory bootstraps, support threshold 0.65, Stage 3 paired
+bootstrap 500, 95% CI, standardized-effect threshold 0.10, onset start 0,
+four-step onset rule, evaluation start 15, terminal window 24, lag tolerance 2,
+matched seeds, dose response, holdout, negative control, observation
+robustness, data efficiency, and Controlled Recovery machinery are unchanged.
 
-## Formal run
-
-Create an environment and install the project:
+## Installation and formal command
 
 ```powershell
 python -m venv .venv
@@ -38,73 +53,70 @@ python -m venv .venv
 Copy-Item config\llm_api.example.json config\llm_api.local.json
 ```
 
-Fill `config/llm_api.local.json`, then run:
+Fill the local API configuration, then use a new run ID:
 
 ```powershell
-python run_experiment.py `
+.\.venv\Scripts\python run_experiment.py `
   --config config\experiment.json `
   --llm-config config\llm_api.local.json `
-  --run-id formal_scale_v2_001 `
+  --run-id confirmatory_path_v4_001 `
   --workers auto `
   --plot-repo "..\llm-agentic-dis"
 ```
 
-Resume an interrupted run by adding `--resume`. Accepted semantic generations
-are skipped only after their request, response, accepted payload, and result
-hashes verify; existing LLM history is append-only. Generate Figure 2--8
-afterward with `render_paper_figures.py`; see `RUNBOOK.md` for the exact commands
-and artifact map.
+Add `--resume` only for the same immutable run. A checkpoint or frozen-artifact
+hash mismatch fails closed. Once baseline simulation exists, semantic stages
+cannot be rerun.
 
-The published `res1` result is retained as development/pilot evidence for the
-earlier scale contract. Do not resume it, copy its scientific artifacts into a
-new run, or combine its favorable rows with the revised protocol. The first
-formal execution of this protocol must use a never-before-used run id such as
-`formal_scale_v2_001` and begin at `semantic`.
+The formal order is:
 
-## Integrity gates
+```text
+indicator_generation -> indicator_freeze -> path_generation -> semantic_freeze
+-> baseline_simulation -> temporal -> path_temporal_qualification
+-> intervention_simulation -> intervention -> path_intervention_classification
+-> prospective -> primary_freeze -> dose_response -> holdout_simulation
+-> holdout_confirmation -> temporal_negative_control -> robustness -> export
+-> render
+```
 
-- Formal semantic generation fails closed if the API key is absent.
-- Formal configuration validation freezes the 16/8/4 capacity, three
-  generations, three repair rounds, 24 seeds, and all Stage 2/3 thresholds.
-- Public Schelling logs contain primitive `agent_id`, `agent_position`,
-  `agent_group`, and `district_id`; they do not contain district outcome scores.
-- Public Deffuant logs contain dynamic `network_edges[time,edge,endpoint]` and
-  elementary `edge_rewired` events; they do not contain community labels or
-  polarization answers.
-- The prompt receives no baseline numerical summary or evaluation information.
-- Model output is declarative JSON AST only; no generated code is evaluated.
-- All three independent generations, repairs, validation errors, and selection reasons are preserved.
-- Parameter associations are model-proposed and never inserted by a deterministic supervisor.
-- Withheld reference states are physically separated under `data/reference_hidden/` and are used only by the labelled Controlled Recovery track.
-- Full Discovery never aligns generated nodes to withheld reference identities and therefore reports no reference F1, SHD, lag MAE, or direction score.
-- The prospective prediction file is hashed before downstream analysis.
-- Missing required prospective responses, wrong directions, temporal-order
-  violations, and missing required observational edges are falsifications.
-- `analysis/attribution_objects.json` integrates `full_method` evidence only;
-  other methods are exported separately for comparison.
-- Unrestricted temporal search removes both structured candidate-edge
-  constraints and semantic branch constraints. It preserves the same lag
-  range, OLS formulation, screening threshold, BH procedure, whole-trajectory
-  bootstrap repetitions, and support threshold; the hypothesis space and FDR
-  grouping are intentionally no longer structure-constrained.
-- Intervention attempts are frozen to an edge-level rule: any explicit
-  directional contradiction overrides support; otherwise at least one support
-  is sufficient even if another applicable attempt is a manipulation failure.
-- A mechanism-disabled check targets one named mechanism pathway. Its overall
-  retained-graph statistics do not imply that all unrelated dynamics should
-  disappear.
-- Source, configuration, prompt, API settings without the key, stage outputs, and final artifacts are hashed.
-- An existing run identifier is never silently overwritten.
-- Toy smoke outputs are physically separate and explicitly marked non-scientific.
+`prospective` in this list evaluates predictions already generated and hashed
+inside Phase B; it does not create or select predictions after seeing results.
 
-## Software checks
+## Main artifacts
+
+- `representation/indicators_frozen.json` and `INDICATORS_FROZEN.sha256`
+- `representation/candidate_paths.json` and
+  `CANDIDATE_PATHS_FROZEN.sha256`
+- `representation/derived_candidate_edges.json`
+- `representation/prospective_predictions.json` and
+  `PROSPECTIVE_PREDICTIONS_FROZEN.sha256`
+- indicator and path replication CSV/JSON files under `representation/`
+- `analysis/path_temporal_qualification.csv`
+- `analysis/path_intervention_classification.csv`
+- `analysis/path_funnel_summary.csv`
+- `analysis/path_dose_response_summary.csv`
+- `analysis/path_temporal_negative_control.csv`
+- `analysis/holdout_path_confirmation.csv`
+- `analysis/prospective_validation.csv`
+- `analysis/representative_path_selection.json`
+- `analysis/attribution_objects.json`
+
+Figure 5 and Figure 7 consume only genuine supported frozen paths. If none
+exist, the renderers report that outcome and do not reconstruct a path from
+unrelated evidence.
+
+## Verification without scientific execution
 
 ```powershell
 python -m pytest -q
 python smoke_pipeline.py --run-id smoke_local --workers 1
-python benchmark_robustness_pool.py --run-id pool_smoke_local --workers 2
+python run_dev_e2e.py --run-id dev_local --workers 2
 ```
 
-The first command runs unit tests. The other commands are deterministic,
-NON_SCIENTIFIC wiring and process-lifecycle checks and must never be used as
-scientific evidence.
+Smoke and dev outputs are marked `NON_SCIENTIFIC`; they verify contracts and
+wiring only. A dev run with zero supported paths is still an engineering pass
+when all frozen-data contracts hold. No mock result is formal evidence.
+
+The previously inspected `res_f` outputs and seed pools 1101--1124 /
+2101--2112 remain development evidence and must not be reused or merged into
+the new confirmatory run.

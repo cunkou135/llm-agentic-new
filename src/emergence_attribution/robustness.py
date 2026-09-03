@@ -627,19 +627,17 @@ def _corrupt_candidates_and_frames(
     if operator == "delete_candidate_relation":
         removed = {int(index) for index in selected}
         candidates = [item for index, item in enumerate(candidates) if index not in removed]
-    elif operator == "wrong_branch_assignment":
+    elif operator == "wrong_hypothesis_group_assignment":
         for sequence, index in enumerate(selected):
-            candidates[int(index)]["branch_id"] = f"misassigned_{sequence % 4}"
-    elif operator == "cross_branch_relation":
+            candidates[int(index)]["hypothesis_group_id"] = f"misassigned_{sequence % 4}"
+    elif operator == "cross_hypothesis_group_relation":
         nodes = representation["indicators"]
         scales = {item["id"]: item["scale"] for item in nodes}
-        branches = {item["id"]: item["branch_id"] for item in nodes}
         eligible = [
             (source["id"], target["id"])
             for source in nodes
             for target in nodes
-            if branches[source["id"]] != branches[target["id"]]
-            and (scales[source["id"]], scales[target["id"]])
+            if (scales[source["id"]], scales[target["id"]])
             in {("micro", "meso"), ("meso", "macro")}
         ]
         existing = {(item["source"], item["target"]) for item in candidates}
@@ -655,7 +653,7 @@ def _corrupt_candidates_and_frames(
                 {
                     "source": source,
                     "target": target,
-                    "branch_id": "cross_branch_corruption",
+                    "hypothesis_group_id": "corrupt_macro_outcome_group",
                     "expected_direction": "unknown",
                 }
             )
@@ -673,15 +671,15 @@ def _corrupt_candidates_and_frames(
                 {
                     "source": name,
                     "target": original["target"],
-                    "branch_id": original["branch_id"],
+                    "hypothesis_group_id": original["hypothesis_group_id"],
                     "expected_direction": "unknown",
                 }
             )
     else:
         raise KeyError(operator)
-    unique: dict[tuple[str, str], dict[str, str]] = {}
+    unique: dict[tuple[str, str, str], dict[str, str]] = {}
     for item in candidates:
-        unique[(item["source"], item["target"])] = item
+        unique[(item["source"], item["target"], item["hypothesis_group_id"])] = item
     return list(unique.values()), frames
 
 
@@ -697,9 +695,9 @@ def run_representation_robustness(
 ) -> pd.DataFrame:
     operators = [
         "irrelevant_indicator",
-        "cross_branch_relation",
+        "cross_hypothesis_group_relation",
         "delete_candidate_relation",
-        "wrong_branch_assignment",
+        "wrong_hypothesis_group_assignment",
         "redundant_semantic_indicator",
     ]
     ratios = config["robustness"]["representation_error_ratios"]
@@ -750,11 +748,11 @@ def run_representation_robustness(
                         "representation": representation,
                         "candidate_count": len(candidates),
                         "candidate_signature": [
-                            [item["source"], item["target"], item["branch_id"]]
+                            [item["source"], item["target"], item["hypothesis_group_id"]]
                             for item in sorted(
                                 candidates,
                                 key=lambda item: (
-                                    item["source"], item["target"], item["branch_id"]
+                                    item["source"], item["target"], item["hypothesis_group_id"]
                                 ),
                             )
                         ],
@@ -884,7 +882,7 @@ def run_causal_scalability(
                     {
                         "source": source,
                         "target": target,
-                        "branch_id": "scaled",
+                        "hypothesis_group_id": "scaled_macro_outcome_group",
                         "expected_direction": "unknown",
                     }
                     for source in identifiers

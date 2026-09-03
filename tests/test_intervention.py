@@ -107,27 +107,25 @@ def test_zero_baseline_sd_classification_is_inconclusive_without_crashing() -> N
     effects = pd.DataFrame(result["summaries"])
     representation = {
         "indicators": [
-            {
-                "id": "constant",
-                "scale": "micro",
-                "branch_id": "branch_a",
-                "parameter_associations": [
+                {
+                    "id": "constant",
+                    "scale": "micro",
+                    "parameter_associations": [
                     {"parameter": "strength", "relationship": "direct"}
                 ],
             },
-            {
-                "id": "target",
-                "scale": "meso",
-                "branch_id": "branch_a",
-                "parameter_associations": [],
+                {
+                    "id": "target",
+                    "scale": "meso",
+                    "parameter_associations": [],
             },
         ],
         "candidate_edges": [
-            {
-                "source": "constant",
-                "target": "target",
-                "branch_id": "branch_a",
-            }
+                {
+                    "source": "constant",
+                    "target": "target",
+                    "hypothesis_group_id": "macro_outcome_target",
+                }
         ],
     }
     edge = TemporalEdge(
@@ -141,7 +139,7 @@ def test_zero_baseline_sd_classification_is_inconclusive_without_crashing() -> N
         support=0.9,
         lag_support=0.8,
         lag_std=0.1,
-        branch_id="branch_a",
+        hypothesis_group_id="macro_outcome_target",
     )
 
     frame = classify_edge_interventions(

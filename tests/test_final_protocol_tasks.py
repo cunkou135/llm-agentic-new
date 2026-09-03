@@ -35,8 +35,8 @@ def _tasks(config: dict, tmp_path: Path, partition: str, phase: str = "all"):
 
 def test_formal_seed_pools_are_frozen_and_disjoint() -> None:
     config = _config()
-    assert config["random_seeds"] == list(range(1101, 1125))
-    assert config["confirmation_seeds"] == list(range(2101, 2113))
+    assert config["random_seeds"] == list(range(3101, 3125))
+    assert config["confirmation_seeds"] == list(range(4101, 4113))
     assert not (set(config["random_seeds"]) & set(config["confirmation_seeds"]))
 
 

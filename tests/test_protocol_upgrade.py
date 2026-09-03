@@ -302,8 +302,7 @@ def test_rolling_micro_signal_cannot_masquerade_as_meso() -> None:
     target["source_fields"] = list(source["source_fields"])
     result = _validation(payload)
     assert not result["valid"]
-    assert any("Meso requires" in error for error in result["errors"])
-    assert any("trivial_cross_scale_transform" in error for error in result["errors"])
+    assert any("trivial cross-scale transform" in error for error in result["errors"])
 
 
 def test_nested_rolling_windows_cannot_form_three_scale_path() -> None:
@@ -361,7 +360,7 @@ def test_macro_scope_must_be_whole_system() -> None:
     )
     macro["entity_scope"] = "community"
     result = _validation(payload)
-    assert any("invalid for macro scale" in error for error in result["errors"])
+    assert any("invalid macro entity scope" in error for error in result["errors"])
 
 
 def test_hidden_truth_isolation_from_prompt_and_full_discovery_modules() -> None:
@@ -417,16 +416,20 @@ def test_semantic_and_prediction_freeze_timestamps_precede_baseline(
         output_family="dev_runs",
     )
     with ProgressReporter(manager.run_root, workers=1) as reporter:
-        run_stage(
-            "semantic",
-            manager,
-            workers=1,
-            reporter=reporter,
-            prompt_template_path=PROJECT_ROOT / "config" / "semantic_prompt.txt",
-            llm_config_path=llm_path,
-            plot_repo=None,
-            completion_provider=mock_completion_provider,
-        )
+        for stage in (
+            "indicator_generation", "indicator_freeze", "path_generation",
+            "semantic_freeze",
+        ):
+            run_stage(
+                stage,
+                manager,
+                workers=1,
+                reporter=reporter,
+                prompt_template_path=PROJECT_ROOT / "config" / "semantic_prompt.txt",
+                llm_config_path=llm_path,
+                plot_repo=None,
+                completion_provider=mock_completion_provider,
+            )
         run_stage(
             "baseline_simulation",
             manager,

@@ -91,7 +91,7 @@ def test_whole_network_operator_cannot_be_meso(expression: dict) -> None:
     result = _validate(payload, "deffuant")
     assert not result["valid"]
     assert any(
-        "global_structure_operator_invalid_for_meso" in error
+        "global structure invalid for meso" in error
         for error in result["errors"]
     )
 
@@ -108,7 +108,7 @@ def test_whole_grid_operator_cannot_be_micro(op: str) -> None:
     result = _validate(payload, "schelling")
     assert not result["valid"]
     assert any(
-        "global_structure_operator_invalid_for_micro" in error
+        "global structure invalid for micro" in error
         for error in result["errors"]
     )
 
@@ -241,7 +241,7 @@ def test_pure_neighborhood_mean_is_rejected_as_complete_path_meso() -> None:
     assert not is_genuine_meso_expression(expression)
     _replace_computation(_indicator(payload, "meso"), expression)
     result = _validate(payload, "deffuant")
-    assert any("pure outer mean/sum is insufficient" in e for e in result["errors"])
+    assert any("Meso lacks non-trivial organization" in e for e in result["errors"])
 
 
 def test_group_mean_without_heterogeneity_is_rejected() -> None:
@@ -260,12 +260,24 @@ def test_group_mean_without_heterogeneity_is_rejected() -> None:
     assert not is_genuine_meso_expression(expression)
     _replace_computation(_indicator(payload, "meso"), expression)
     result = _validate(payload, "schelling")
-    assert any("pure outer mean/sum is insufficient" in e for e in result["errors"])
+    assert any("Meso lacks non-trivial organization" in e for e in result["errors"])
 
 
 def test_equivalent_fraction_and_logged_count_path_is_rejected() -> None:
     payload = mock_generation("schelling")
     macro = _indicator(payload, "macro", 0)
+    path = next(
+        item for item in payload["representation"]["candidate_paths"]
+        if item["macro_indicator"] == macro["id"]
+    )
+    micro = next(
+        item for item in payload["representation"]["indicators"]
+        if item["id"] == path["micro_indicator"]
+    )
+    _replace_computation(
+        micro,
+        {"op": "fraction", "input": _field("unhappy"), "axis": "agent"},
+    )
     _replace_computation(
         macro,
         {
@@ -276,12 +288,21 @@ def test_equivalent_fraction_and_logged_count_path_is_rejected() -> None:
     )
     result = _validate(payload, "schelling")
     assert not result["valid"]
-    assert any("trivial_micro_macro_lineage" in e for e in result["errors"])
+    assert any("trivial Micro-Macro lineage" in e for e in result["errors"])
 
 
 def test_time_difference_of_micro_primitive_path_is_rejected() -> None:
     payload = mock_generation("schelling")
     macro = _indicator(payload, "macro", 0)
+    path = next(
+        item for item in payload["representation"]["candidate_paths"]
+        if item["macro_indicator"] == macro["id"]
+    )
+    micro = next(
+        item for item in payload["representation"]["indicators"]
+        if item["id"] == path["micro_indicator"]
+    )
+    _replace_computation(micro, _field("moved"))
     _replace_computation(
         macro,
         {
@@ -295,7 +316,7 @@ def test_time_difference_of_micro_primitive_path_is_rejected() -> None:
     )
     result = _validate(payload, "schelling")
     assert not result["valid"]
-    assert any("trivial_micro_macro_lineage" in e for e in result["errors"])
+    assert any("trivial Micro-Macro lineage" in e for e in result["errors"])
 
 
 def test_genuinely_independent_macro_lineage_is_accepted() -> None:
