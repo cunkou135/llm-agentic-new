@@ -175,38 +175,21 @@ def test_dose_response_effects_and_summary_are_secondary_and_paired() -> None:
     assert not bool(row["primary_classification_changed"])
 
 
-def test_holdout_path_confirmation_uses_exact_frozen_root_and_does_not_reselect() -> None:
+def test_holdout_path_confirmation_uses_shared_stage3_path_result() -> None:
     frozen = _frozen_path()
     before = frozen.copy(deep=True)
-    rows = [
-        {
+    holdout_paths = pd.DataFrame(
+        [{
             "scenario": "toy",
+            "path_id": "theta:plus:micro_a>meso_b>macro_c",
             "hypothesis_group_id": "macro_outcome_macro_c",
-            "root_source": "micro_a",
-            "source": source,
-            "target": target,
-            "parameter": "theta",
-            "direction": "plus",
-            "primary_class": "supported",
-            "method": "frozen_full_method",
-        }
-        for source, target in (("micro_a", "meso_b"), ("meso_b", "macro_c"))
-    ]
-    # A different root is deliberately contradictory and must not be borrowed.
-    rows.append(
-        {
-            "scenario": "toy",
-            "hypothesis_group_id": "macro_outcome_macro_c",
-            "root_source": "micro_d",
-            "source": "meso_b",
-            "target": "macro_c",
-            "parameter": "theta",
-            "direction": "plus",
-            "primary_class": "directionally_contradicted",
-            "method": "trajectory_vote",
-        }
+            "parameter": "theta", "direction": "plus",
+            "micro": "micro_a", "meso": "meso_b", "macro": "macro_c",
+            "micro_meso_class": "supported", "meso_macro_class": "supported",
+            "path_classification": "supported",
+        }]
     )
-    result = holdout_path_confirmation(frozen, pd.DataFrame(rows))
+    result = holdout_path_confirmation(frozen, holdout_paths)
     assert list(result.columns) == HOLDOUT_PATH_COLUMNS
     assert result.iloc[0]["classification"] == "confirmed"
     assert bool(result.iloc[0]["primary_result_unchanged"])

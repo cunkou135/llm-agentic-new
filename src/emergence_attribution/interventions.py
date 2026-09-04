@@ -44,9 +44,11 @@ class EffectSummary:
 CLASSIFICATION_COLUMNS = [
     "scenario", "hypothesis_group_id", "root_source", "edge_source", "edge_target",
     "source", "target", "parameter", "direction", "manipulation_level",
-    "manipulation_success", "primary_class", "underlying_class",
+    "manipulation_success", "source_significant", "target_significant",
+    "propagation_order_supported", "primary_class", "underlying_class",
     "intervention_scope", "root_onset", "source_onset", "target_onset",
-    "intervention_delay", "observational_lag", "lag_difference",
+    "intervention_delay", "observational_lag", "observational_beta",
+    "lag_difference", "temporal_direction_concordant", "lag_concordant",
     "root_effect", "source_effect", "target_effect", "not_applicable_reason",
 ]
 
@@ -70,6 +72,27 @@ PATH_TIMING_COLUMNS = [
     "cumulative_effect",
     "cumulative_effect_raw",
     "significant",
+]
+
+
+PATH_TIMING_CONCORDANCE_COLUMNS = [
+    "scenario", "path_id", "parameter", "direction", "hypothesis_group_id",
+    "micro", "meso", "macro",
+    "expected_micro_response", "expected_meso_response", "expected_macro_response",
+    "micro_effect", "meso_effect", "macro_effect",
+    "micro_significant", "meso_significant", "macro_significant",
+    "micro_onset", "meso_onset", "macro_onset",
+    "micro_meso_observational_beta", "meso_macro_observational_beta",
+    "micro_meso_observational_lag", "meso_macro_observational_lag",
+    "micro_meso_intervention_delay", "meso_macro_intervention_delay",
+    "micro_meso_temporal_direction_concordant",
+    "meso_macro_temporal_direction_concordant",
+    "micro_meso_lag_difference", "meso_macro_lag_difference",
+    "micro_meso_lag_concordant", "meso_macro_lag_concordant",
+    "observational_total_lag", "intervention_total_latency",
+    "total_lag_difference", "total_lag_concordant",
+    "manipulation_success", "response_direction_supported",
+    "onset_order_supported", "path_classification", "reason",
 ]
 
 
@@ -606,6 +629,7 @@ def not_applicable_classification(
     source: str = "",
     target: str = "",
     observational_lag: float = np.nan,
+    observational_beta: float = np.nan,
     reason: str,
 ) -> dict[str, Any]:
     return {
@@ -620,6 +644,9 @@ def not_applicable_classification(
         "direction": "",
         "manipulation_level": "none",
         "manipulation_success": False,
+        "source_significant": False,
+        "target_significant": False,
+        "propagation_order_supported": False,
         "primary_class": "not_applicable",
         "underlying_class": "not_applicable",
         "intervention_scope": "none",
@@ -628,7 +655,10 @@ def not_applicable_classification(
         "target_onset": -1,
         "intervention_delay": np.nan,
         "observational_lag": observational_lag,
+        "observational_beta": observational_beta,
         "lag_difference": np.nan,
+        "temporal_direction_concordant": pd.NA,
+        "lag_concordant": pd.NA,
         "root_effect": np.nan,
         "source_effect": np.nan,
         "target_effect": np.nan,
@@ -642,6 +672,8 @@ def classify_edge_interventions(
     effects: pd.DataFrame,
     representation: dict[str, Any],
     lag_tolerance: int,
+    *,
+    observational_hard_gates: bool = False,
 ) -> pd.DataFrame:
     if not graph:
         return pd.DataFrame(columns=CLASSIFICATION_COLUMNS)
@@ -662,6 +694,7 @@ def classify_edge_interventions(
                     source=edge.source,
                     target=edge.target,
                     observational_lag=edge.lag,
+                    observational_beta=edge.beta,
                     reason="no_legal_upstream_micro_manipulation_root",
                 )
             )
@@ -676,31 +709,53 @@ def classify_edge_interventions(
                 if root is None or source is None or target is None:
                     evidence = "inconclusive"
                     success = False
+                    source_significant = target_significant = False
+                    propagation_order_supported = False
+                    temporal_direction_concordant = lag_concordant = pd.NA
                     root_onset = source_onset = target_onset = -1
                     root_effect = source_effect = target_effect = np.nan
                     delay = lag_difference = np.nan
                 else:
-                    success = bool(root.significant)
                     root_onset = int(root.onset_time)
                     source_onset, target_onset = int(source.onset_time), int(target.onset_time)
                     root_effect = float(root.cumulative_effect_standardised)
                     source_effect = float(source.cumulative_effect_standardised)
                     target_effect = float(target.cumulative_effect_standardised)
+                    success = bool(root.significant and np.isfinite(root_effect))
+                    source_significant = bool(source.significant)
+                    target_significant = bool(target.significant)
                     delay = (
                         float(target_onset - source_onset)
                         if source_onset >= 0 and target_onset >= 0
                         else np.nan
                     )
                     lag_difference = delay - edge.lag if np.isfinite(delay) else np.nan
-                    propagation_order_ok = bool(
+                    propagation_order_supported = bool(
+                        source_onset >= 0
+                        and target_onset >= 0
+                        and target_onset >= source_onset
+                    )
+                    legacy_propagation_order_supported = bool(
                         root_onset >= 0
                         and source_onset >= root_onset
                         and target_onset >= source_onset
                     )
-                    timing_ok = bool(
-                        propagation_order_ok
-                        and np.isfinite(delay)
-                        and abs(lag_difference) <= lag_tolerance
+                    expected_target_sign = (
+                        int(np.sign(source_effect * edge.beta))
+                        if np.isfinite(source_effect) and np.isfinite(edge.beta)
+                        else 0
+                    )
+                    observed_target_sign = (
+                        int(np.sign(target_effect)) if np.isfinite(target_effect) else 0
+                    )
+                    temporal_direction_concordant = (
+                        bool(observed_target_sign == expected_target_sign)
+                        if expected_target_sign != 0 and observed_target_sign != 0
+                        else pd.NA
+                    )
+                    lag_concordant = (
+                        bool(abs(lag_difference) <= lag_tolerance)
+                        if np.isfinite(lag_difference) else pd.NA
                     )
                     if not np.isfinite(root_effect):
                         evidence = "inconclusive"
@@ -710,17 +765,22 @@ def classify_edge_interventions(
                         evidence = "inconclusive"
                     elif not source.significant or not target.significant:
                         evidence = "no_stable_downstream_effect"
-                    else:
-                        expected_target_sign = int(np.sign(source_effect * edge.beta))
-                        observed_target_sign = int(np.sign(target_effect))
+                    elif observational_hard_gates:
                         if expected_target_sign == 0:
                             evidence = "inconclusive"
-                        elif observed_target_sign != expected_target_sign:
+                        elif not bool(temporal_direction_concordant):
                             evidence = "directionally_contradicted"
-                        elif timing_ok:
+                        elif (
+                            legacy_propagation_order_supported
+                            and bool(lag_concordant)
+                        ):
                             evidence = "supported"
                         else:
                             evidence = "inconclusive"
+                    elif propagation_order_supported:
+                        evidence = "supported"
+                    else:
+                        evidence = "inconclusive"
                 rows.append(
                     {
                         "scenario": scenario,
@@ -734,6 +794,9 @@ def classify_edge_interventions(
                         "direction": direction,
                         "manipulation_level": route["manipulation_level"],
                         "manipulation_success": success,
+                        "source_significant": source_significant,
+                        "target_significant": target_significant,
+                        "propagation_order_supported": propagation_order_supported,
                         "primary_class": evidence,
                         "underlying_class": evidence,
                         "intervention_scope": route["intervention_scope"],
@@ -742,7 +805,10 @@ def classify_edge_interventions(
                         "target_onset": target_onset,
                         "intervention_delay": delay,
                         "observational_lag": edge.lag,
+                        "observational_beta": edge.beta,
                         "lag_difference": lag_difference,
+                        "temporal_direction_concordant": temporal_direction_concordant,
+                        "lag_concordant": lag_concordant,
                         "root_effect": root_effect,
                         "source_effect": source_effect,
                         "target_effect": target_effect,
@@ -957,6 +1023,7 @@ PATH_INTERVENTION_CLASSIFICATION_COLUMNS = [
     "scenario", "path_id", "parameter", "direction", "hypothesis_group_id",
     "micro", "meso", "macro",
     "path_temporally_qualified", "manipulation_success",
+    "micro_significant", "meso_significant", "macro_significant",
     "micro_meso_class", "meso_macro_class", "direction_supported",
     "onset_order_supported", "path_classification", "reason",
 ]
@@ -994,7 +1061,11 @@ def classify_candidate_paths(
             )
             subset = classifications[
                 (classifications["scenario"].astype(str) == scenario)
-                & (classifications["method"].astype(str) == "full_method")
+                & (
+                    classifications["method"].astype(str).isin(
+                        {"full_method", "frozen_full_method"}
+                    )
+                )
                 & (classifications["parameter"].astype(str) == parameter)
                 & (classifications["direction"].astype(str) == direction)
                 & (classifications["root_source"].astype(str) == micro)
@@ -1028,6 +1099,15 @@ def classify_candidate_paths(
                 float(first["target_effect"]) if first is not None else np.nan,
                 float(second["target_effect"]) if second is not None else np.nan,
             )
+            micro_significant = bool(
+                first is not None and first.get("manipulation_success", False)
+            )
+            meso_significant = bool(
+                first is not None and first.get("target_significant", False)
+            )
+            macro_significant = bool(
+                second is not None and second.get("target_significant", False)
+            )
             expected_responses = (
                 str(path["expected_micro_response"]),
                 str(path["expected_meso_response"]),
@@ -1038,18 +1118,7 @@ def classify_candidate_paths(
                 and int(np.sign(effect)) == (1 if expected == "increase" else -1)
                 for effect, expected in zip(effects, expected_responses)
             ]
-            edge_direction_matches = []
-            for parent, child, expected in (
-                (effects[0], effects[1], str(path["micro_to_meso_expected_direction"])),
-                (effects[1], effects[2], str(path["meso_to_macro_expected_direction"])),
-            ):
-                edge_direction_matches.append(
-                    np.isfinite(parent)
-                    and np.isfinite(child)
-                    and int(np.sign(parent * child))
-                    == (1 if expected == "increase" else -1)
-                )
-            direction_supported = bool(all(response_matches + edge_direction_matches))
+            direction_supported = bool(all(response_matches))
             onsets = (
                 float(first["root_onset"]) if first is not None else np.nan,
                 float(first["target_onset"]) if first is not None else np.nan,
@@ -1062,27 +1131,24 @@ def classify_candidate_paths(
             if not qualified:
                 classification = "inconclusive"
                 reason = "path_not_temporally_qualified"
-            elif not manipulation_success or first_class == "manipulation_failure":
+            elif not manipulation_success:
                 classification = "manipulation_failure"
                 reason = "required_micro_manipulation_failed"
-            elif (
-                first_class == "directionally_contradicted"
-                or second_class == "directionally_contradicted"
-                or (all(np.isfinite(value) for value in effects) and not direction_supported)
+            elif not (
+                micro_significant and meso_significant and macro_significant
+                and all(np.isfinite(value) for value in effects)
             ):
-                classification = "contradicted"
-                reason = "frozen_direction_contradicted"
-            elif (
-                first_class == "supported"
-                and second_class == "supported"
-                and direction_supported
-                and onset_order_supported
-            ):
-                classification = "supported"
-                reason = "all_frozen_path_requirements_supported"
-            else:
                 classification = "inconclusive"
-                reason = "insufficient_complete_path_evidence"
+                reason = "required_multiscale_response_not_stable"
+            elif not direction_supported:
+                classification = "contradicted"
+                reason = "frozen_response_direction_contradicted"
+            elif not onset_order_supported:
+                classification = "inconclusive"
+                reason = "intervention_onset_order_not_supported"
+            else:
+                classification = "supported"
+                reason = "all_stage3_v2_hard_criteria_supported"
             rows.append(
                 {
                     "scenario": scenario, "path_id": path_id,
@@ -1091,6 +1157,9 @@ def classify_candidate_paths(
                     "micro": micro, "meso": meso, "macro": macro,
                     "path_temporally_qualified": qualified,
                     "manipulation_success": manipulation_success,
+                    "micro_significant": micro_significant,
+                    "meso_significant": meso_significant,
+                    "macro_significant": macro_significant,
                     "micro_meso_class": first_class,
                     "meso_macro_class": second_class,
                     "direction_supported": direction_supported,
@@ -1100,6 +1169,161 @@ def classify_candidate_paths(
                 }
             )
     return pd.DataFrame(rows, columns=PATH_INTERVENTION_CLASSIFICATION_COLUMNS)
+
+
+def path_timing_concordance(
+    temporal_qualification: pd.DataFrame,
+    effects: pd.DataFrame,
+    representations: dict[str, dict[str, Any]],
+    path_classification: pd.DataFrame,
+    lag_tolerance: int,
+) -> pd.DataFrame:
+    """Report observational/intervention concordance without using it as a gate."""
+
+    classified = {
+        (str(row.scenario), str(row.path_id)): row
+        for row in path_classification.itertuples(index=False)
+    }
+    rows: list[dict[str, Any]] = []
+    qualified = temporal_qualification[
+        temporal_qualification["path_temporally_qualified"].astype(bool)
+    ]
+    for temporal in qualified.itertuples(index=False):
+        scenario = str(temporal.scenario)
+        path_id = str(temporal.path_id)
+        paths = {
+            str(path["path_id"]): path
+            for path in representations[scenario].get("candidate_paths", [])
+        }
+        path = paths[path_id]
+        parameter = str(path["parameter"])
+        direction = str(path["intervention_direction"])
+        micro = str(path["micro_indicator"])
+        meso = str(path["meso_indicator"])
+        macro = str(path["macro_indicator"])
+        selected = effects[
+            (effects["scenario"].astype(str) == scenario)
+            & (effects["parameter"].astype(str) == parameter)
+            & (effects["direction"].astype(str) == direction)
+            & (effects["node_id"].astype(str).isin([micro, meso, macro]))
+        ]
+        lookup = {
+            str(item.node_id): item for item in selected.itertuples(index=False)
+        }
+
+        def effect_value(node: str) -> float:
+            item = lookup.get(node)
+            return (
+                float(item.cumulative_effect_standardised)
+                if item is not None else np.nan
+            )
+
+        def significant(node: str) -> bool:
+            item = lookup.get(node)
+            return bool(item is not None and item.significant)
+
+        def onset(node: str) -> int:
+            item = lookup.get(node)
+            return int(item.onset_time) if item is not None else -1
+
+        micro_effect, meso_effect, macro_effect = (
+            effect_value(micro), effect_value(meso), effect_value(macro)
+        )
+        micro_onset, meso_onset, macro_onset = (
+            onset(micro), onset(meso), onset(macro)
+        )
+        micro_meso_delay = (
+            float(meso_onset - micro_onset)
+            if micro_onset >= 0 and meso_onset >= 0 else np.nan
+        )
+        meso_macro_delay = (
+            float(macro_onset - meso_onset)
+            if meso_onset >= 0 and macro_onset >= 0 else np.nan
+        )
+        micro_meso_lag = float(temporal.micro_meso_lag)
+        meso_macro_lag = float(temporal.meso_macro_lag)
+        micro_meso_difference = micro_meso_delay - micro_meso_lag
+        meso_macro_difference = meso_macro_delay - meso_macro_lag
+
+        def temporal_direction_concordant(
+            parent_effect: float, child_effect: float, beta: float
+        ) -> bool | Any:
+            if not all(np.isfinite(value) for value in (parent_effect, child_effect, beta)):
+                return pd.NA
+            response_sign = int(np.sign(parent_effect * child_effect))
+            beta_sign = int(np.sign(beta))
+            return bool(response_sign != 0 and beta_sign != 0 and response_sign == beta_sign)
+
+        observational_total_lag = micro_meso_lag + meso_macro_lag
+        intervention_total_latency = (
+            float(macro_onset - micro_onset)
+            if micro_onset >= 0 and macro_onset >= 0 else np.nan
+        )
+        total_lag_difference = intervention_total_latency - observational_total_lag
+        path_result = classified.get((scenario, path_id))
+        rows.append(
+            {
+                "scenario": scenario, "path_id": path_id,
+                "parameter": parameter, "direction": direction,
+                "hypothesis_group_id": f"macro_outcome_{macro}",
+                "micro": micro, "meso": meso, "macro": macro,
+                "expected_micro_response": path["expected_micro_response"],
+                "expected_meso_response": path["expected_meso_response"],
+                "expected_macro_response": path["expected_macro_response"],
+                "micro_effect": micro_effect, "meso_effect": meso_effect,
+                "macro_effect": macro_effect,
+                "micro_significant": significant(micro),
+                "meso_significant": significant(meso),
+                "macro_significant": significant(macro),
+                "micro_onset": micro_onset, "meso_onset": meso_onset,
+                "macro_onset": macro_onset,
+                "micro_meso_observational_beta": temporal.micro_meso_beta,
+                "meso_macro_observational_beta": temporal.meso_macro_beta,
+                "micro_meso_observational_lag": micro_meso_lag,
+                "meso_macro_observational_lag": meso_macro_lag,
+                "micro_meso_intervention_delay": micro_meso_delay,
+                "meso_macro_intervention_delay": meso_macro_delay,
+                "micro_meso_temporal_direction_concordant": temporal_direction_concordant(
+                    micro_effect, meso_effect, float(temporal.micro_meso_beta)
+                ),
+                "meso_macro_temporal_direction_concordant": temporal_direction_concordant(
+                    meso_effect, macro_effect, float(temporal.meso_macro_beta)
+                ),
+                "micro_meso_lag_difference": micro_meso_difference,
+                "meso_macro_lag_difference": meso_macro_difference,
+                "micro_meso_lag_concordant": bool(
+                    abs(micro_meso_difference) <= lag_tolerance
+                ),
+                "meso_macro_lag_concordant": bool(
+                    abs(meso_macro_difference) <= lag_tolerance
+                ),
+                "observational_total_lag": observational_total_lag,
+                "intervention_total_latency": intervention_total_latency,
+                "total_lag_difference": total_lag_difference,
+                "total_lag_concordant": bool(
+                    np.isfinite(total_lag_difference)
+                    and abs(total_lag_difference) <= lag_tolerance
+                ),
+                "manipulation_success": bool(
+                    significant(micro) and np.isfinite(micro_effect)
+                ),
+                "response_direction_supported": bool(
+                    path_result is not None and path_result.direction_supported
+                ),
+                "onset_order_supported": bool(
+                    path_result is not None and path_result.onset_order_supported
+                ),
+                "path_classification": (
+                    str(path_result.path_classification)
+                    if path_result is not None else "inconclusive"
+                ),
+                "reason": (
+                    str(path_result.reason)
+                    if path_result is not None else "missing_path_classification"
+                ),
+            }
+        )
+    return pd.DataFrame(rows, columns=PATH_TIMING_CONCORDANCE_COLUMNS)
 
 
 def select_representative_paths(
@@ -1205,6 +1429,13 @@ def run_intervention_stage(
     path_classification = classify_candidate_paths(
         qualification_frame, classification_frame, representations
     )
+    timing_concordance = path_timing_concordance(
+        qualification_frame,
+        effects,
+        representations,
+        path_classification,
+        int(config["intervention"]["lag_tolerance"]),
+    )
     effects.insert(0, "evaluation_track", "primary_discovery")
     curves.insert(0, "evaluation_track", "primary_discovery")
     classification_frame.insert(0, "evaluation_track", "primary_discovery")
@@ -1228,6 +1459,9 @@ def run_intervention_stage(
         analysis_root / "path_intervention_classification.csv", index=False
     )
     timing_frame.to_csv(analysis_root / "path_timing_summary.csv", index=False)
+    timing_concordance.to_csv(
+        analysis_root / "path_timing_concordance.csv", index=False
+    )
     selection = select_representative_paths(path_classification)
     (analysis_root / "representative_path_selection.json").write_text(
         json.dumps(selection, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -1238,4 +1472,6 @@ def run_intervention_stage(
         "classification_rows": len(classification_frame),
         "path_rows": len(timing_frame),
         "path_classification_rows": len(path_classification),
+        "path_timing_concordance_rows": len(timing_concordance),
+        "stage3_method_version": "intervention_path_classification_v2",
     }

@@ -21,8 +21,10 @@ from .final_protocol import (
 )
 from .interventions import (
     CLASSIFICATION_COLUMNS,
+    classify_candidate_paths,
     classify_edge_interventions,
     estimate_all_effects,
+    qualify_candidate_paths,
     select_representative_paths,
 )
 from .primary_freeze import verify_primary_contract
@@ -269,10 +271,12 @@ def run_holdout_confirmation_analysis(
     )
     primary_graphs = load_graph_records(run_root / "analysis" / "main_graphs.jsonl")
     classifications: list[pd.DataFrame] = []
+    temporal_qualifications: list[pd.DataFrame] = []
     for scenario, representation in sorted(representations.items()):
+        graph = primary_graphs[(scenario, "full_method")]
         classified = classify_edge_interventions(
             scenario,
-            primary_graphs[(scenario, "full_method")],
+            graph,
             effects,
             representation,
             int(config["intervention"]["lag_tolerance"]),
@@ -282,10 +286,21 @@ def run_holdout_confirmation_analysis(
         classified.insert(0, "method", "frozen_full_method")
         classified.insert(0, "evaluation_track", "holdout_confirmation")
         classifications.append(classified)
+        temporal_qualifications.append(
+            qualify_candidate_paths(scenario, graph, representation)
+        )
     holdout_classifications = pd.concat(classifications, ignore_index=True)
+    holdout_temporal_qualification = pd.concat(
+        temporal_qualifications, ignore_index=True
+    )
+    holdout_path_classification = classify_candidate_paths(
+        holdout_temporal_qualification,
+        holdout_classifications,
+        representations,
+    )
     frozen_paths = _validated_primary_paths(run_root)
     path_confirmation = holdout_path_confirmation(
-        frozen_paths, holdout_classifications
+        frozen_paths, holdout_path_classification
     )
     frozen_predictions = json.loads(
         (run_root / "representation" / "prospective_predictions.json").read_text(
@@ -380,9 +395,11 @@ def run_holdout_confirmation_analysis(
         "effect_rows": len(effects),
         "classification_rows": len(holdout_classifications),
         "path_confirmation_rows": len(path_confirmation),
+        "holdout_path_classification_rows": len(holdout_path_classification),
         "prospective_confirmation_rows": len(prospective_confirmation),
         "mechanism_confirmation_rows": len(mechanism_confirmation),
         "primary_result_unchanged": True,
+        "stage3_method_version": "intervention_path_classification_v2",
     }
 
 

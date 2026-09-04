@@ -555,9 +555,9 @@ def _confirmation_class(value: str) -> str:
 
 def holdout_path_confirmation(
     frozen_primary_paths: pd.DataFrame,
-    holdout_classifications: pd.DataFrame,
+    holdout_path_classifications: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Confirm exact frozen paths; never searches for a replacement path."""
+    """Map the shared Stage 3 path definition to independent holdout results."""
 
     if frozen_primary_paths.empty:
         return _empty(HOLDOUT_PATH_COLUMNS)
@@ -567,12 +567,13 @@ def holdout_path_confirmation(
         "frozen primary paths",
     )
     _require_columns(
-        holdout_classifications,
+        holdout_path_classifications,
         {
-            "scenario", "hypothesis_group_id", "root_source", "source", "target",
-            "parameter", "direction", "primary_class",
+            "scenario", "path_id", "hypothesis_group_id", "parameter", "direction",
+            "micro", "meso", "macro", "micro_meso_class", "meso_macro_class",
+            "path_classification",
         },
-        "holdout classifications",
+        "holdout path classifications",
     )
     rows: list[dict[str, Any]] = []
     for (_, path_id), group in frozen_primary_paths.groupby(
@@ -587,49 +588,31 @@ def holdout_path_confirmation(
         definition["micro"] = str(first[micro_column])
         definition["source"] = definition["micro"]
         definition["hypothesis_group_id"] = f"macro_outcome_{definition['macro']}"
-        subset = holdout_classifications[
-            (holdout_classifications["scenario"].astype(str) == definition["scenario"])
-            & (holdout_classifications["parameter"].astype(str) == definition["parameter"])
-            & (holdout_classifications["direction"].astype(str) == definition["direction"])
-            & (holdout_classifications["root_source"].astype(str) == definition["source"])
+        subset = holdout_path_classifications[
+            (holdout_path_classifications["scenario"].astype(str) == definition["scenario"])
+            & (holdout_path_classifications["path_id"].astype(str) == definition["path_id"])
+            & (holdout_path_classifications["parameter"].astype(str) == definition["parameter"])
+            & (holdout_path_classifications["direction"].astype(str) == definition["direction"])
             & (
-                holdout_classifications["hypothesis_group_id"].astype(str)
+                holdout_path_classifications["hypothesis_group_id"].astype(str)
                 == definition["hypothesis_group_id"]
             )
         ]
-        if "method" in subset.columns:
-            subset = subset[
-                subset["method"].astype(str).isin(
-                    {"full_method", "frozen_full_method"}
-                )
-            ]
-        edge_classes: list[str] = []
-        for source, target in (
-            (definition["source"], definition["meso"]),
-            (definition["meso"], definition["macro"]),
-        ):
-            attempts = subset[
-                (subset["source"].astype(str) == source)
-                & (subset["target"].astype(str) == target)
-            ]["primary_class"].astype(str).tolist()
-            if not attempts:
-                edge_classes.append("inconclusive")
-            elif "directionally_contradicted" in attempts:
-                edge_classes.append("directionally_contradicted")
-            elif "supported" in attempts:
-                edge_classes.append("supported")
-            elif "manipulation_failure" in attempts:
-                edge_classes.append("manipulation_failure")
-            elif "no_stable_downstream_effect" in attempts:
-                edge_classes.append("no_stable_downstream_effect")
-            else:
-                edge_classes.append("inconclusive")
+        holdout = subset.iloc[0] if len(subset) else None
+        edge_classes = (
+            [str(holdout["micro_meso_class"]), str(holdout["meso_macro_class"])]
+            if holdout is not None else ["inconclusive", "inconclusive"]
+        )
         confirmations = [_confirmation_class(value) for value in edge_classes]
-        if "manipulation_failure" in confirmations:
-            classification = "manipulation_failure"
-        elif all(value == "confirmed" for value in confirmations):
+        path_class = (
+            str(holdout["path_classification"])
+            if holdout is not None else "inconclusive"
+        )
+        if path_class == "supported":
             classification = "confirmed"
-        elif "failed_confirmation" in confirmations:
+        elif path_class == "manipulation_failure":
+            classification = "manipulation_failure"
+        elif path_class == "contradicted":
             classification = "failed_confirmation"
         else:
             classification = "inconclusive"

@@ -6,12 +6,15 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 from pydantic import ValidationError
 
 from emergence_attribution.interventions import (
     classify_candidate_paths,
+    classify_edge_interventions,
+    path_timing_concordance,
     qualify_candidate_paths,
 )
 from emergence_attribution.mock_semantic import (
@@ -214,56 +217,107 @@ def test_path_temporal_qualification_requires_both_group_specific_edges() -> Non
     assert not bool(rejected.iloc[0]["path_temporally_qualified"])
 
 
-def _path_attempts(path: dict, first_class: str, second_class: str, manipulation: bool = True) -> pd.DataFrame:
-    base = {
-        "scenario": "schelling", "method": "full_method",
-        "hypothesis_group_id": f"macro_outcome_{path['macro_indicator']}",
-        "root_source": path["micro_indicator"], "parameter": path["parameter"],
-        "direction": path["intervention_direction"],
-        "manipulation_success": manipulation, "root_onset": 0,
-        "root_effect": 0.5, "source_effect": 0.5,
+def _stage3_v2_result(
+    *,
+    effects: tuple[float, float, float] = (0.5, 0.4, 0.3),
+    significant: tuple[bool, bool, bool] = (True, True, True),
+    onsets: tuple[int, int, int] = (0, 0, 5),
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    path = {
+        "path_id": "path_v2", "parameter": "theta",
+        "intervention_direction": "plus", "micro_indicator": "micro_a",
+        "meso_indicator": "meso_b", "macro_indicator": "macro_c",
+        "expected_micro_response": "increase",
+        "expected_meso_response": "increase",
+        "expected_macro_response": "increase",
+        "micro_to_meso_expected_direction": "increase",
+        "meso_to_macro_expected_direction": "increase",
     }
-    return pd.DataFrame(
+    representation = {
+        "indicators": [
+            {
+                "id": "micro_a", "scale": "micro",
+                "parameter_associations": [
+                    {"parameter": "theta", "relationship": "direct"}
+                ],
+            },
+            {"id": "meso_b", "scale": "meso", "parameter_associations": []},
+            {"id": "macro_c", "scale": "macro", "parameter_associations": []},
+        ],
+        "candidate_paths": [path],
+    }
+    group = "macro_outcome_macro_c"
+    graph = [
+        TemporalEdge(
+            source="micro_a", target="meso_b", lag=4, beta=-0.4,
+            p_value=0.01, q_value=0.02, effect_direction="decrease",
+            support=0.8, lag_support=0.8, lag_std=0.0,
+            hypothesis_group_id=group,
+        ),
+        TemporalEdge(
+            source="meso_b", target="macro_c", lag=1, beta=-0.4,
+            p_value=0.01, q_value=0.02, effect_direction="decrease",
+            support=0.8, lag_support=0.8, lag_std=0.0,
+            hypothesis_group_id=group,
+        ),
+    ]
+    effect_frame = pd.DataFrame(
         [
             {
-                **base, "source": path["micro_indicator"], "target": path["meso_indicator"],
-                "primary_class": first_class, "target_effect": 0.4,
-                "source_onset": 0, "target_onset": 1,
-            },
-            {
-                **base, "source": path["meso_indicator"], "target": path["macro_indicator"],
-                "primary_class": second_class, "target_effect": 0.3,
-                "source_onset": 1, "target_onset": 2,
-            },
+                "scenario": "toy", "parameter": "theta", "direction": "plus",
+                "node_id": node, "cumulative_effect_standardised": effect,
+                "onset_time": onset, "significant": is_significant,
+            }
+            for node, effect, onset, is_significant in zip(
+                ("micro_a", "meso_b", "macro_c"), effects, onsets, significant
+            )
         ]
     )
+    qualification = qualify_candidate_paths("toy", graph, representation)
+    edge_classification = classify_edge_interventions(
+        "toy", graph, effect_frame, representation, lag_tolerance=2
+    )
+    edge_classification.insert(1, "method", "full_method")
+    path_classification = classify_candidate_paths(
+        qualification, edge_classification, {"toy": representation}
+    )
+    concordance = path_timing_concordance(
+        qualification, effect_frame, {"toy": representation},
+        path_classification, lag_tolerance=2,
+    )
+    return edge_classification, path_classification, concordance
 
 
-@pytest.mark.parametrize(
-    ("first", "second", "manipulation", "expected"),
-    [
-        ("supported", "supported", True, "supported"),
-        ("directionally_contradicted", "supported", True, "contradicted"),
-        ("supported", "no_stable_downstream_effect", True, "inconclusive"),
-        ("manipulation_failure", "inconclusive", False, "manipulation_failure"),
-    ],
-)
-def test_path_intervention_classification(
-    first: str, second: str, manipulation: bool, expected: str
-) -> None:
-    representation = _one_path_representation()
-    path = representation["candidate_paths"][0]
-    qualification = pd.DataFrame(
-        [{
-            "scenario": "schelling", "path_id": path["path_id"],
-            "path_temporally_qualified": True,
-        }]
-    )
-    result = classify_candidate_paths(
-        qualification, _path_attempts(path, first, second, manipulation),
-        {"schelling": representation},
-    )
-    assert result.iloc[0]["path_classification"] == expected
+def test_stage3_v2_lag_and_beta_mismatch_are_auxiliary() -> None:
+    edges, paths, concordance = _stage3_v2_result()
+    plus = edges[edges["direction"] == "plus"]
+    assert (plus["primary_class"] == "supported").all()
+    assert not plus["temporal_direction_concordant"].astype(bool).any()
+    assert not plus["lag_concordant"].astype(bool).any()
+    assert paths.iloc[0]["path_classification"] == "supported"
+    row = concordance.iloc[0]
+    assert not bool(row["micro_meso_lag_concordant"])
+    assert not bool(row["meso_macro_lag_concordant"])
+    assert row["observational_total_lag"] == 5
+    assert row["intervention_total_latency"] == 5
+
+
+def test_stage3_v2_frozen_macro_response_contradiction() -> None:
+    _, paths, _ = _stage3_v2_result(effects=(0.5, 0.4, -0.3))
+    assert paths.iloc[0]["path_classification"] == "contradicted"
+    assert paths.iloc[0]["reason"] == "frozen_response_direction_contradicted"
+
+
+def test_stage3_v2_requires_stable_response_at_all_scales() -> None:
+    _, paths, _ = _stage3_v2_result(significant=(True, False, True))
+    assert paths.iloc[0]["path_classification"] == "inconclusive"
+    assert paths.iloc[0]["reason"] == "required_multiscale_response_not_stable"
+
+
+def test_stage3_v2_requires_ordered_multiscale_onsets() -> None:
+    _, paths, _ = _stage3_v2_result(onsets=(2, 5, 3))
+    assert paths.iloc[0]["path_classification"] == "inconclusive"
+    assert paths.iloc[0]["reason"] == "intervention_onset_order_not_supported"
 
 
 def test_path_intervention_evidence_isolated_by_macro_hypothesis_group() -> None:
@@ -299,7 +353,8 @@ def test_path_intervention_evidence_isolated_by_macro_hypothesis_group() -> None
     common = {
         "scenario": "toy", "method": "full_method", "root_source": "micro_a",
         "parameter": "theta", "direction": "plus", "manipulation_success": True,
-        "root_onset": 0, "root_effect": 0.5, "source_effect": 0.5,
+        "target_significant": True, "root_onset": 0,
+        "root_effect": 0.5, "source_effect": 0.5,
     }
     classifications = pd.DataFrame(
         [

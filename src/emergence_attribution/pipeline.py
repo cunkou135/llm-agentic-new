@@ -392,6 +392,7 @@ def run_stage(
             "analysis/intervention_classifications.csv",
             "analysis/edge_intervention_classifications.csv",
             "analysis/path_timing_summary.csv",
+            "analysis/path_timing_concordance.csv",
             "analysis/controlled_recovery_*", "analysis/main_results.csv",
         ])
     elif stage == "prospective":

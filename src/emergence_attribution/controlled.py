@@ -343,6 +343,7 @@ def run_controlled_intervention_stage(
             frame = classify_edge_interventions(
                 scenario, graphs[(scenario, method)], effects, representation,
                 int(config["intervention"]["lag_tolerance"]),
+                observational_hard_gates=True,
             )
             if frame.empty:
                 frame = pd.DataFrame(
